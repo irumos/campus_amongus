@@ -70,10 +70,10 @@ export function PrintKitPasscodeModal({
 
   return (
     <div className="fixed inset-0 z-50 bg-[#060913]/92 backdrop-blur-xl flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full max-w-md glass-card rounded-t-3xl sm:rounded-3xl p-5 space-y-4 border-emerald-400/25">
+      <div className="w-full max-w-md max-h-[94dvh] overflow-y-auto overscroll-contain glass-card rounded-t-3xl sm:rounded-3xl p-4 sm:p-5 space-y-4 border-emerald-400/25">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-400/40 flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-emerald-500/15 border border-emerald-400/40 flex items-center justify-center shrink-0">
               <Printer className="w-4 h-4 text-emerald-300" />
             </div>
             <div>
@@ -93,7 +93,7 @@ export function PrintKitPasscodeModal({
               onClose();
             }}
             aria-label="Close Print Kit Passcode"
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/10 text-slate-300 hover:text-white"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/10 text-slate-300 hover:text-white shrink-0"
           >
             <X className="w-5 h-5" />
           </button>

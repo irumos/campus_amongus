@@ -8,6 +8,7 @@ import {
   Fingerprint,
   Ghost,
   Lock,
+  LogOut,
   Megaphone,
   Radio,
   RotateCcw,
@@ -51,6 +52,7 @@ interface GameplayScreenProps {
   onCallMeeting: () => void;
   onEnterGhostMode: () => void;
   onResetMatch: () => void;
+  onExitMatch?: () => void;
 }
 
 const LONG_PRESS_OPS_MS = 450;
@@ -136,11 +138,13 @@ export function GameplayScreen({
   onCallMeeting,
   onEnterGhostMode,
   onResetMatch,
+  onExitMatch,
 }: GameplayScreenProps) {
   const [roleRevealed, setRoleRevealed] = useState(false);
   const [isPhoneTilted, setIsPhoneTilted] = useState(false);
   const [isWindowHidden, setIsWindowHidden] = useState(false);
   const [covertOpsOpen, setCovertOpsOpen] = useState(false);
+  const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [holdChargePct, setHoldChargePct] = useState(0);
   const [now, setNow] = useState(Date.now());
   const activeStations = useCampusStations().map(toTaskStation);
@@ -174,6 +178,9 @@ export function GameplayScreen({
       setRoleRevealed(false);
       setIsPhoneTilted(false);
       setCovertOpsOpen(false);
+    }
+    if (winner) {
+      setConfirmExitOpen(false);
     }
   }, [winner, effectiveStatus]);
 
@@ -443,10 +450,73 @@ export function GameplayScreen({
     'bg-violet-400',
   ];
 
+  const exitConfirmationModal = confirmExitOpen && onExitMatch && (
+    <div
+      onClick={() => setConfirmExitOpen(false)}
+      className="fixed inset-0 z-50 bg-[#060913]/90 backdrop-blur-md flex items-center justify-center p-5"
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className="w-full max-w-sm glass-card rounded-3xl p-5 space-y-4 border-rose-500/35 text-center"
+      >
+        <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-400/40 flex items-center justify-center mx-auto">
+          <LogOut className="w-6 h-6 text-rose-400" />
+        </div>
+        <div className="space-y-1.5">
+          <h3 className="font-display text-lg font-extrabold tracking-wide uppercase text-white">
+            Exit Active Match?
+          </h3>
+          <p className="text-xs text-slate-300 leading-relaxed">
+            You will leave this room immediately and all remaining operatives will receive a live exit update.
+          </p>
+        </div>
+        <div className="grid grid-cols-2 gap-2.5 pt-1">
+          <button
+            type="button"
+            onClick={() => {
+              playUiClick();
+              setConfirmExitOpen(false);
+            }}
+            className="min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/15 text-xs font-bold uppercase tracking-wider text-slate-200 active:scale-95 transition-all"
+          >
+            Stay
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              playUiClick();
+              setConfirmExitOpen(false);
+              onExitMatch();
+            }}
+            className="min-h-[44px] rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-extrabold uppercase tracking-wider text-white shadow-[0_0_20px_rgba(244,63,94,0.35)] active:scale-95 transition-all"
+          >
+            Exit Match
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
   // SCREEN 6A: ELIMINATED BEFORE MEETING
   if (effectiveStatus === 'eliminated' && !winner) {
     return (
-      <div className="flex-1 min-h-0 flex flex-col justify-between px-4 pb-4 pt-2">
+      <div className="flex-1 min-h-0 flex flex-col justify-between px-4 sm:px-5 pb-4 pt-2">
+        <div className="flex justify-end shrink-0">
+          {onExitMatch && (
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                setConfirmExitOpen(true);
+              }}
+              className="min-h-[38px] px-3 rounded-xl bg-slate-900/85 hover:bg-rose-950/80 border border-white/15 hover:border-rose-500/40 text-[11px] font-bold uppercase tracking-wider text-slate-200 hover:text-rose-200 inline-flex items-center gap-1.5 transition-colors active:scale-95"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span>Exit Match</span>
+            </button>
+          )}
+        </div>
+
         <div className="my-auto space-y-4 text-center">
           <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
             <span className="animate-radar absolute inset-0 rounded-full border border-violet-400/50" />
@@ -479,6 +549,8 @@ export function GameplayScreen({
           <Ghost className="w-5 h-5" />
           <span>Enter Phantom Mode</span>
         </button>
+
+        {exitConfirmationModal}
       </div>
     );
   }
@@ -494,27 +566,43 @@ export function GameplayScreen({
   const tiltBlockedDuringHold = roleRevealed && isPhoneTilted;
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col justify-between px-3.5 pb-3 pt-1 gap-2.5">
+    <div className="flex-1 min-h-0 flex flex-col justify-between px-3.5 sm:px-5 pb-3 sm:pb-4 pt-1 gap-2 sm:gap-2.5">
       {/* Top HUD Region */}
       <div className="shrink-0 space-y-2">
         <div className="glass-card rounded-2xl px-3.5 py-2.5 space-y-1.5">
-          <div className="flex items-center justify-between text-[11px] font-extrabold tracking-wider uppercase">
-            <span className="text-slate-300">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold tracking-wider uppercase">
+            <span className="text-slate-300 truncate">
               Team Tasks{' '}
               <span className="text-emerald-400 font-mono tabular-nums ml-1">
                 {taskProgress}%
               </span>
             </span>
-            {effectiveStatus === 'alive' && (
-              <button
-                type="button"
-                onClick={onCallMeeting}
-                className="min-h-[28px] px-1.5 -mr-1.5 rounded-lg text-[11px] font-bold text-amber-400 hover:text-amber-300 flex items-center gap-1 transition-colors"
-              >
-                <Megaphone className="w-3.5 h-3.5" />
-                <span>Call Meeting</span>
-              </button>
-            )}
+            <div className="flex items-center gap-1.5 shrink-0">
+              {effectiveStatus === 'alive' && (
+                <button
+                  type="button"
+                  onClick={onCallMeeting}
+                  className="min-h-[34px] px-2 rounded-lg text-[11px] font-bold text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 flex items-center gap-1 transition-colors whitespace-nowrap"
+                >
+                  <Megaphone className="w-3.5 h-3.5" />
+                  <span>Call Meeting</span>
+                </button>
+              )}
+              {onExitMatch && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    playUiClick();
+                    setConfirmExitOpen(true);
+                  }}
+                  title="Exit Active Match"
+                  className="min-h-[34px] px-2 rounded-lg bg-slate-900/80 hover:bg-rose-950/80 border border-white/10 hover:border-rose-500/40 text-[10px] font-bold text-slate-300 hover:text-rose-200 flex items-center gap-1 transition-colors whitespace-nowrap"
+                >
+                  <LogOut className="w-3 h-3" />
+                  <span>Exit</span>
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="h-3 w-full rounded-full bg-slate-950/90 border border-white/10 p-0.5 overflow-hidden">
@@ -836,7 +924,7 @@ export function GameplayScreen({
                 </div>
 
                 <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pr-0.5">
-                  <div className="grid grid-cols-2 gap-2 pb-0.5">
+                  <div className="grid grid-cols-2 gap-2 sm:gap-2.5 pb-0.5">
                     {objectiveCards.map((obj, idx) => {
                       const isLastOdd =
                         objectiveCards.length % 2 === 1 &&
@@ -852,10 +940,10 @@ export function GameplayScreen({
                           key={obj.key}
                           type="button"
                           onClick={() => onScanStation(obj.scanStationId)}
-                          className={`glass-card rounded-2xl p-2.5 flex flex-col justify-between gap-1.5 text-left transition-all active:scale-95 ${
+                          className={`glass-card rounded-2xl p-2.5 sm:p-3.5 flex flex-col justify-between gap-1.5 text-left transition-all active:scale-95 ${
                             isLastOdd || obj.isLongRelay
-                              ? 'col-span-2 min-h-[64px]'
-                              : 'min-h-[76px]'
+                              ? 'col-span-2 min-h-[clamp(60px,8.5dvh,78px)]'
+                              : 'min-h-[clamp(68px,10dvh,88px)]'
                           } ${
                             obj.isDone
                               ? 'border-emerald-500/45 bg-emerald-950/30'
@@ -1187,6 +1275,8 @@ export function GameplayScreen({
           </div>
         </div>
       )}
+
+      {exitConfirmationModal}
     </div>
   );
 }

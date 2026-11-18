@@ -59,17 +59,51 @@ export function setLobbyPrintPasscode(
     // ignore storage errors
   }
 
-  // Best-effort sync to Supabase if the optional print_passcode column exists
+  // Best-effort sync to Supabase: update existing room or upsert minimal room row if not yet created
   if (supabase && isSupabaseConfigured) {
-    void supabase
-      .from('rooms')
-      .update({ print_passcode: trimmed || null } as Record<string, unknown>)
-      .eq('room_code', code)
-      .then(({ error }) => {
-        if (error) {
-          logSupabaseTableError('rooms', 'updatePrintPasscode', error);
+    const client = supabase;
+    void (async () => {
+      try {
+        const { data: existing, error: selErr } = await client
+          .from('rooms')
+          .select('room_code')
+          .eq('room_code', code)
+          .maybeSingle();
+
+        if (selErr) {
+          logSupabaseTableError('rooms', 'checkRoomForPasscode', selErr);
         }
-      });
+
+        if (existing) {
+          const { error: updErr } = await client
+            .from('rooms')
+            .update({ print_passcode: trimmed || null } as Record<string, unknown>)
+            .eq('room_code', code);
+          if (updErr) {
+            logSupabaseTableError('rooms', 'updatePrintPasscode', updErr);
+          }
+        } else if (trimmed) {
+          const { error: insErr } = await client
+            .from('rooms')
+            .upsert(
+              {
+                room_code: code,
+                status: 'LOBBY',
+                winner: null,
+                task_progress: 0,
+                impostor_count: 1,
+                print_passcode: trimmed,
+              } as Record<string, unknown>,
+              { onConflict: 'room_code' }
+            );
+          if (insErr) {
+            logSupabaseTableError('rooms', 'upsertRoomPrintPasscode', insErr);
+          }
+        }
+      } catch (err) {
+        logSupabaseTableError('rooms', 'syncPrintPasscodeException', err);
+      }
+    })();
   }
 
   return trimmed || null;
@@ -102,6 +136,16 @@ export async function verifyLobbyPrintPasscode(
         const remoteCode = (data as { print_passcode?: unknown }).print_passcode;
         if (typeof remoteCode === 'string' && remoteCode.trim().length > 0) {
           expected = remoteCode.trim();
+          const map = getPrintPasscodeMap();
+          if (map[roomCode] !== expected) {
+            map[roomCode] = expected;
+            try {
+              localStorage.setItem(PASSCODES_STORAGE_KEY, JSON.stringify(map));
+              window.dispatchEvent(new CustomEvent(PASSCODES_EVENT));
+            } catch {
+              // ignore storage errors
+            }
+          }
         }
       }
     } catch (err) {

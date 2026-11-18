@@ -61,7 +61,7 @@ export function JoinScreen({
         playUiClick();
         onJoinLobby();
       }}
-      className="flex-1 min-h-0 flex flex-col justify-between px-3.5 pb-3 pt-1 gap-2"
+      className="flex-1 min-h-0 flex flex-col justify-between px-3.5 sm:px-5 pb-3 sm:pb-4 pt-1 gap-2 sm:gap-3"
     >
       {/* Compact Hero */}
       <div className="text-center space-y-1.5 shrink-0">
@@ -250,14 +250,14 @@ export function JoinScreen({
           <ArrowRight className="w-5 h-5" />
         </button>
 
-        <div className="flex items-center justify-center gap-3">
+        <div className="flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
           <button
             type="button"
             onClick={() => {
               playUiClick();
               onOpenPrintKit();
             }}
-            className="inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-400 hover:text-cyan-300 py-1 px-2 transition-colors"
+            className="min-h-[44px] inline-flex items-center gap-1.5 text-[11px] font-semibold text-slate-300 hover:text-cyan-300 px-3 py-1.5 rounded-xl hover:bg-white/5 transition-colors whitespace-nowrap"
           >
             <Printer className="w-3.5 h-3.5" />
             <span>Host Printable QR Kit</span>
@@ -275,7 +275,7 @@ export function JoinScreen({
                   setShowIosGuide(true);
                 }
               }}
-              className="inline-flex items-center gap-1 text-[11px] font-semibold text-cyan-300 hover:text-cyan-200 py-1 px-2 transition-colors"
+              className="min-h-[44px] inline-flex items-center gap-1.5 text-[11px] font-semibold text-cyan-300 hover:text-cyan-200 px-3 py-1.5 rounded-xl hover:bg-cyan-500/10 transition-colors whitespace-nowrap"
             >
               <Download className="w-3.5 h-3.5" />
               <span>Add to Home Screen</span>

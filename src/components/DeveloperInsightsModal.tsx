@@ -76,6 +76,8 @@ interface DeveloperInsightsModalProps {
   events: DeveloperInsightEvent[];
   recentLobbies: string[];
   activeRoomCodeDraft: string;
+  hasActiveOverride?: boolean;
+  onReturnToLiveGame?: () => void;
   onCreateLobby: (roomCode: string, impostorCount: 1 | 2) => Promise<void>;
   onSwitchLobby: (roomCode: string) => Promise<void>;
   onAddCandidate: (
@@ -149,6 +151,8 @@ export function DeveloperInsightsModal({
   events,
   recentLobbies,
   activeRoomCodeDraft,
+  hasActiveOverride = false,
+  onReturnToLiveGame,
   onCreateLobby,
   onSwitchLobby,
   onAddCandidate,
@@ -345,68 +349,50 @@ export function DeveloperInsightsModal({
     { id: 'lobby', label: 'Lobby' },
     { id: 'crewmate', label: 'Crew HUD' },
     { id: 'impostor', label: 'Impostor HUD' },
+    { id: 'eliminated', label: 'Eliminated' },
+    { id: 'ghost', label: 'Ghost' },
     { id: 'meeting', label: 'Meeting' },
     { id: 'print', label: 'Print Kit' },
   ];
 
   return (
     <div className="fixed inset-0 z-50 bg-[#050812]/92 backdrop-blur-xl flex items-center justify-center p-0 sm:p-4">
-      <div className="w-full lg:w-[96vw] max-w-md lg:max-w-6xl h-dvh sm:h-[90dvh] glass-card sm:rounded-3xl p-4 lg:p-5 flex flex-col gap-3.5 border-cyan-400/25 overflow-hidden">
-        {/* Top Laptop Header */}
-        <div className="shrink-0 flex flex-wrap items-center justify-between gap-3 border-b border-white/10 pb-3">
-          <div className="flex items-center gap-3 min-w-0">
-            <div className="w-10 h-10 rounded-xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center shrink-0">
-              <Wrench className="w-5 h-5 text-cyan-300" />
+      <div className="w-full md:w-[96vw] max-w-2xl lg:max-w-6xl h-dvh sm:h-[92dvh] glass-card sm:rounded-3xl p-3.5 sm:p-4 lg:p-5 flex flex-col gap-3 border-cyan-400/25 overflow-hidden">
+        {/* Top Command Deck Header */}
+        <div className="shrink-0 flex flex-wrap items-center justify-between gap-2.5 border-b border-white/10 pb-2.5">
+          <div className="flex items-center gap-2.5 sm:gap-3 min-w-0">
+            <div className="w-9 h-9 sm:w-10 sm:h-10 rounded-xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center shrink-0">
+              <Wrench className="w-4 h-4 sm:w-5 sm:h-5 text-cyan-300" />
             </div>
             <div className="min-w-0">
-              <div className="flex items-center gap-2 flex-wrap">
-                <h2 className="font-display text-base lg:text-lg font-extrabold tracking-wider uppercase text-white">
+              <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap">
+                <h2 className="font-display text-sm sm:text-base lg:text-lg font-extrabold tracking-wider uppercase text-white">
                   DEVELOPER STUDIO &amp; INSIGHTS
                 </h2>
-                <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/35 text-[10px] font-mono font-bold text-emerald-300">
-                  PASSCODE VERIFIED
+                <span className="px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/35 text-[9px] sm:text-[10px] font-mono font-bold text-emerald-300">
+                  VERIFIED
                 </span>
-                <span className="hidden sm:inline-flex px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-400/35 text-[10px] font-mono font-bold text-cyan-200">
-                  LOBBY: {activeLobbyCode}
+                <span className="px-2 py-0.5 rounded-md bg-cyan-500/15 border border-cyan-400/35 text-[9px] sm:text-[10px] font-mono font-bold text-cyan-200">
+                  {activeLobbyCode}
                 </span>
               </div>
               <p className="text-[11px] font-mono text-slate-400 truncate">
-                Laptop Command Deck · Create Lobbies, Candidates, Campus Rooms &amp; Task Mini-Games
+                Command Deck · Manage Lobbies, Passcodes, Rooms &amp; Live View
               </p>
             </div>
           </div>
 
-          {/* Quick Actions & Screen Switcher */}
-          <div className="flex items-center gap-1.5 flex-wrap">
-            <div className="hidden xl:flex items-center gap-1 bg-slate-950/80 border border-white/10 rounded-xl p-1 mr-1">
-              {quickNavItems.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={() => {
-                    playUiClick();
-                    onSelectPreset(item.id);
-                    if (item.id === 'print') {
-                      onClose();
-                    }
-                  }}
-                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold text-slate-300 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1"
-                >
-                  {item.id === 'print' && <Printer className="w-3 h-3" />}
-                  <span>{item.label}</span>
-                </button>
-              ))}
-            </div>
-
+          {/* Right Header Actions */}
+          <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
               onClick={() => void handleCopySnapshot()}
-              className="h-9 px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-cyan-300 text-xs font-bold flex items-center gap-1.5 active:scale-95 transition-all"
+              className="h-9 px-2.5 sm:px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-cyan-300 text-xs font-bold flex items-center gap-1.5 active:scale-95 transition-all whitespace-nowrap"
             >
               {copied ? (
                 <>
                   <Check className="w-3.5 h-3.5 text-emerald-400" />
-                  <span className="text-emerald-300">Copied JSON</span>
+                  <span className="text-emerald-300">Copied</span>
                 </>
               ) : (
                 <>
@@ -422,10 +408,22 @@ export function DeveloperInsightsModal({
                 playUiClick();
                 onLockDevMode();
               }}
-              className="h-9 px-3 rounded-xl bg-rose-950/75 hover:bg-rose-900/75 border border-rose-500/40 text-rose-200 text-xs font-bold flex items-center gap-1.5 active:scale-95 transition-all"
+              className="h-9 px-2.5 sm:px-3 rounded-xl bg-rose-950/75 hover:bg-rose-900/75 border border-rose-500/40 text-rose-200 text-xs font-bold flex items-center gap-1.5 active:scale-95 transition-all whitespace-nowrap"
             >
               <Lock className="w-3.5 h-3.5" />
               <span className="hidden sm:inline">Lock Dev</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                onClose();
+              }}
+              className="h-9 px-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold uppercase tracking-wide flex items-center gap-1.5 active:scale-95 transition-all whitespace-nowrap shrink-0"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>Back to Game</span>
             </button>
 
             <button
@@ -439,6 +437,45 @@ export function DeveloperInsightsModal({
             >
               <X className="w-4 h-4" />
             </button>
+          </div>
+        </div>
+
+        {/* Universal 1-Tap Screen Switcher Strip (All Viewports, Auto-Closes into Selected View) */}
+        <div className="shrink-0 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+          {onReturnToLiveGame && (
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                onReturnToLiveGame();
+                onClose();
+              }}
+              className={`shrink-0 h-8 px-2.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1 border transition-all whitespace-nowrap ${
+                hasActiveOverride
+                  ? 'bg-emerald-500 text-slate-950 border-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.4)]'
+                  : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/25'
+              }`}
+            >
+              <Radio className="w-3 h-3" />
+              <span>Live Game</span>
+            </button>
+          )}
+          <div className="flex items-center gap-1 bg-slate-950/80 border border-white/10 rounded-xl p-1 shrink-0">
+            {quickNavItems.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => {
+                  playUiClick();
+                  onSelectPreset(item.id);
+                  onClose();
+                }}
+                className="h-7 px-2.5 rounded-lg text-[11px] font-bold text-slate-300 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1 whitespace-nowrap"
+              >
+                {item.id === 'print' && <Printer className="w-3 h-3" />}
+                <span>{item.label}</span>
+              </button>
+            ))}
           </div>
         </div>
 

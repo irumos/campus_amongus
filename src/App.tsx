@@ -82,6 +82,7 @@ export default function App() {
     insightEvents,
     clearInsightEvents,
     recentLobbies,
+    rosterNotification,
     identity,
     room,
     publicPlayers,
@@ -251,6 +252,14 @@ export default function App() {
       showToast(`Sync Warning: ${syncError}`);
     }
   }, [syncError, showToast]);
+
+  const lastRosterToastIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!rosterNotification) return;
+    if (lastRosterToastIdRef.current === rosterNotification.id) return;
+    lastRosterToastIdRef.current = rosterNotification.id;
+    showToast(rosterNotification.message, 3200);
+  }, [rosterNotification, showToast]);
 
   useEffect(() => {
     const onPopState = () => {
@@ -479,6 +488,37 @@ export default function App() {
     showToast('Printable QR Kit Locked');
   }, [identity, showToast]);
 
+  const hasActiveOverride = Boolean(
+    screenOverride || roleOverride || statusOverride
+  );
+
+  const handleReturnToLiveMatch = useCallback(() => {
+    setScreenOverride(null);
+    setRoleOverride(null);
+    setStatusOverride(null);
+    if (window.location.pathname === '/print') {
+      window.history.pushState({}, '', '/');
+    }
+    showToast(identity ? 'Returned to Live Match' : 'Returned to Live View');
+  }, [identity, showToast]);
+
+  const handleExitMatchOrLobby = useCallback(() => {
+    playUiClick();
+    setJoinError(null);
+    setScannerMode(null);
+    setTargetStationId(null);
+    setActiveMiniGameStation(null);
+    setFakeCompletedIds([]);
+    setScreenOverride(null);
+    setRoleOverride(null);
+    setStatusOverride(null);
+    if (window.location.pathname === '/print') {
+      window.history.pushState({}, '', '/');
+    }
+    leaveRoom();
+    showToast('Exited Room');
+  }, [leaveRoom, showToast]);
+
   const handleSelectDevPreset = useCallback(
     async (preset: DevPresetId) => {
       if (preset !== 'join' && preset !== 'print') {
@@ -521,7 +561,13 @@ export default function App() {
           navigateScreen('meeting');
           break;
         case 'print':
-          handleOpenPrintKitRequest();
+          if (isDebugMode) {
+            const targetRoom = normalizeRoomCode(identity?.roomCode || roomCode);
+            setUnlockedPrintRoomCode(targetRoom);
+            navigateScreen('print');
+          } else {
+            handleOpenPrintKitRequest();
+          }
           break;
       }
     },
@@ -531,6 +577,9 @@ export default function App() {
       room?.status,
       callMeeting,
       handleOpenPrintKitRequest,
+      isDebugMode,
+      identity?.roomCode,
+      roomCode,
     ]
   );
 
@@ -668,6 +717,49 @@ export default function App() {
     ? 'connected'
     : 'disconnected';
 
+  const insightsModalNode =
+    showInsightsModal && isDebugMode ? (
+      <DeveloperInsightsModal
+        isSupabaseConfigured={isSupabaseConfigured}
+        connectionStatus={topBarConnectionStatus}
+        reconnectAttempt={reconnectAttempt}
+        latencyMs={realtimeLatencyMs}
+        syncError={syncError}
+        identity={identity}
+        room={room}
+        publicPlayers={publicPlayers}
+        privateRole={privateRole}
+        votes={votes}
+        events={insightEvents}
+        recentLobbies={recentLobbies}
+        activeRoomCodeDraft={roomCode}
+        hasActiveOverride={hasActiveOverride}
+        onReturnToLiveGame={handleReturnToLiveMatch}
+        onCreateLobby={async (code, impostors) => {
+          const created = await createLobby(code, impostors);
+          setRoomCode(created);
+        }}
+        onSwitchLobby={async (code) => {
+          await switchLobby(code);
+          setRoomCode(code);
+        }}
+        onAddCandidate={addCandidate}
+        onRemoveCandidate={removeCandidate}
+        onToggleCandidateAlive={toggleCandidateAlive}
+        onSeedDemoPlayers={seedDemoPlayers}
+        onSetImpostorCount={setImpostorCount}
+        onStartMatch={startMatch}
+        onResetMatch={resetRoom}
+        onSelectPreset={(preset) => void handleSelectDevPreset(preset)}
+        onTestStationMiniGame={(station) =>
+          setActiveMiniGameStation(toTaskStation(station))
+        }
+        onClearEvents={clearInsightEvents}
+        onLockDevMode={handleLockDevMode}
+        onClose={() => setShowInsightsModal(false)}
+      />
+    ) : null;
+
   if (activeScreen === 'print') {
     if (!unlockedPrintRoomCode) {
       return (
@@ -694,7 +786,9 @@ export default function App() {
           activeScreen={activeScreen}
           roleOverride={roleOverride}
           statusOverride={statusOverride}
+          hasActiveOverride={hasActiveOverride}
           onSelectPreset={(preset) => void handleSelectDevPreset(preset)}
+          onClearOverrides={handleReturnToLiveMatch}
           onTriggerSabotage={() => {
             void triggerSabotage('REACTOR');
             playEmergencySiren();
@@ -702,6 +796,8 @@ export default function App() {
           onSeedDemoPlayers={() => {
             void ensureJoinedForDev().then(() => seedDemoPlayers());
           }}
+          onOpenInsights={() => setShowInsightsModal(true)}
+          onLockDevMode={handleLockDevMode}
         />
         <PrintKitScreen
           unlockedRoomCode={unlockedPrintRoomCode}
@@ -713,6 +809,7 @@ export default function App() {
             }
           }}
         />
+        {insightsModalNode}
       </>
     );
   }
@@ -734,20 +831,22 @@ export default function App() {
           }`}
         />
       )}
-      {/* Non-Overlapping Mobile-First Flex Column Shell */}
-      <main className="w-full max-w-lg mx-auto h-dvh flex flex-col overflow-hidden relative z-10">
+      {/* Non-Overlapping Scalable Flex Column Shell */}
+      <main className="w-full max-w-xl md:max-w-2xl mx-auto h-dvh flex flex-col overflow-hidden relative z-10">
         {/* Reserved Top Strip with Supabase Realtime Heartbeat & Passcode-Gated Dev Controls */}
         <DevSwitcherBar
           isDebugMode={isDebugMode}
           activeScreen={activeScreen}
           roleOverride={roleOverride}
           statusOverride={statusOverride}
+          hasActiveOverride={hasActiveOverride}
           roomCode={identity?.roomCode || roomCode}
           wsConnected={isConnectionHealthy}
           connectionStatus={topBarConnectionStatus}
           reconnectAttempt={reconnectAttempt}
           wsLatencyMs={realtimeLatencyMs}
           onSelectPreset={(preset) => void handleSelectDevPreset(preset)}
+          onClearOverrides={handleReturnToLiveMatch}
           onTriggerSabotage={() => {
             void ensureJoinedForDev().then(() => triggerSabotage('REACTOR'));
             playEmergencySiren();
@@ -802,12 +901,7 @@ export default function App() {
             onSetImpostorCount={(count) => void setImpostorCount(count)}
             onStartMatch={() => void handleStartMatch()}
             onSeedDemoPlayers={() => void seedDemoPlayers()}
-            onLeaveLobby={() => {
-              playUiClick();
-              setJoinError(null);
-              setScreenOverride(null);
-              leaveRoom();
-            }}
+            onLeaveLobby={handleExitMatchOrLobby}
           />
         )}
 
@@ -866,6 +960,7 @@ export default function App() {
               setStatusOverride(null);
               void resetRoom();
             }}
+            onExitMatch={handleExitMatchOrLobby}
           />
         )}
 
@@ -890,6 +985,7 @@ export default function App() {
               setScreenOverride(null);
               void dismissEjection();
             }}
+            onExitMatch={handleExitMatchOrLobby}
           />
         )}
       </main>
@@ -948,45 +1044,7 @@ export default function App() {
       )}
 
       {/* Developer Insights & Laptop Studio Drawer */}
-      {showInsightsModal && isDebugMode && (
-        <DeveloperInsightsModal
-          isSupabaseConfigured={isSupabaseConfigured}
-          connectionStatus={topBarConnectionStatus}
-          reconnectAttempt={reconnectAttempt}
-          latencyMs={realtimeLatencyMs}
-          syncError={syncError}
-          identity={identity}
-          room={room}
-          publicPlayers={publicPlayers}
-          privateRole={privateRole}
-          votes={votes}
-          events={insightEvents}
-          recentLobbies={recentLobbies}
-          activeRoomCodeDraft={roomCode}
-          onCreateLobby={async (code, impostors) => {
-            const created = await createLobby(code, impostors);
-            setRoomCode(created);
-          }}
-          onSwitchLobby={async (code) => {
-            await switchLobby(code);
-            setRoomCode(code);
-          }}
-          onAddCandidate={addCandidate}
-          onRemoveCandidate={removeCandidate}
-          onToggleCandidateAlive={toggleCandidateAlive}
-          onSeedDemoPlayers={seedDemoPlayers}
-          onSetImpostorCount={setImpostorCount}
-          onStartMatch={startMatch}
-          onResetMatch={resetRoom}
-          onSelectPreset={(preset) => void handleSelectDevPreset(preset)}
-          onTestStationMiniGame={(station) =>
-            setActiveMiniGameStation(toTaskStation(station))
-          }
-          onClearEvents={clearInsightEvents}
-          onLockDevMode={handleLockDevMode}
-          onClose={() => setShowInsightsModal(false)}
-        />
-      )}
+      {insightsModalNode}
     </div>
   );
 }

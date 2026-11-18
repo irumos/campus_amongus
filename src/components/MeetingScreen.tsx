@@ -1,5 +1,12 @@
 import { useEffect, useState } from 'react';
-import { ArrowRight, Check, Megaphone, SkipForward, Skull } from 'lucide-react';
+import {
+  ArrowRight,
+  Check,
+  LogOut,
+  Megaphone,
+  SkipForward,
+  Skull,
+} from 'lucide-react';
 import { getBadgeInfo, type MeetingState, type Player } from '../shared/gameData';
 import { playUiClick } from '../utils/feedback';
 
@@ -11,6 +18,7 @@ interface MeetingScreenProps {
   onCastVote: (targetPlayerId: string | 'skip') => void;
   onFinalizeNow: () => void;
   onDismissEjection: () => void;
+  onExitMatch?: () => void;
 }
 
 export function MeetingScreen({
@@ -21,8 +29,10 @@ export function MeetingScreen({
   onCastVote,
   onFinalizeNow,
   onDismissEjection,
+  onExitMatch,
 }: MeetingScreenProps) {
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [now, setNow] = useState(Date.now());
   const [typedLength, setTypedLength] = useState(0);
 
@@ -76,51 +86,68 @@ export function MeetingScreen({
   }, [ejectionFullText]);
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col justify-between px-3.5 pb-3 pt-1 gap-2.5">
+    <div className="flex-1 min-h-0 flex flex-col justify-between px-3.5 sm:px-5 pb-3 sm:pb-4 pt-1 gap-2.5 sm:gap-3">
       {/* Top Siren Header */}
-      <div className="shrink-0 animate-siren rounded-2xl border-2 px-3.5 py-2.5 flex items-center justify-between gap-3 shadow-[0_0_26px_rgba(245,158,11,0.3)]">
+      <div className="shrink-0 animate-siren rounded-2xl border-2 px-3.5 py-2.5 flex items-center justify-between gap-2.5 shadow-[0_0_26px_rgba(245,158,11,0.3)]">
         <div className="space-y-0.5 min-w-0">
           <div className="inline-flex items-center gap-1.5 text-[10px] font-mono font-extrabold tracking-widest uppercase text-amber-300">
             <Megaphone className="w-3.5 h-3.5 shrink-0" />
             <span className="truncate">{meeting?.reason || 'EMERGENCY PROTOCOL'}</span>
           </div>
-          <h1 className="font-display text-sm font-extrabold tracking-wide uppercase text-white leading-tight">
+          <h1 className="font-display text-sm sm:text-base font-extrabold tracking-wide uppercase text-white leading-tight">
             EMERGENCY MEETING — MAIN LOBBY
           </h1>
         </div>
 
-        <div className="relative w-12 h-12 flex items-center justify-center shrink-0">
-          <svg className="w-12 h-12 -rotate-90" viewBox="0 0 48 48">
-            <circle
-              cx="24"
-              cy="24"
-              r="20"
-              fill="none"
-              stroke="rgba(255,255,255,0.12)"
-              strokeWidth="4"
-            />
-            <circle
-              cx="24"
-              cy="24"
-              r="20"
-              fill="none"
-              stroke="#f59e0b"
-              strokeWidth="4"
-              strokeLinecap="round"
-              strokeDasharray={2 * Math.PI * 20}
-              strokeDashoffset={2 * Math.PI * 20 * (1 - timerRatio)}
-            />
-          </svg>
-          <span className="absolute font-mono text-[10px] font-extrabold text-amber-200 tabular-nums">
-            {formattedTime}
-          </span>
+        <div className="flex items-center gap-2 shrink-0">
+          <div className="relative w-12 h-12 flex items-center justify-center shrink-0">
+            <svg className="w-12 h-12 -rotate-90" viewBox="0 0 48 48">
+              <circle
+                cx="24"
+                cy="24"
+                r="20"
+                fill="none"
+                stroke="rgba(255,255,255,0.12)"
+                strokeWidth="4"
+              />
+              <circle
+                cx="24"
+                cy="24"
+                r="20"
+                fill="none"
+                stroke="#f59e0b"
+                strokeWidth="4"
+                strokeLinecap="round"
+                strokeDasharray={2 * Math.PI * 20}
+                strokeDashoffset={2 * Math.PI * 20 * (1 - timerRatio)}
+              />
+            </svg>
+            <span className="absolute font-mono text-[10px] font-extrabold text-amber-200 tabular-nums">
+              {formattedTime}
+            </span>
+          </div>
+
+          {onExitMatch && (
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                setConfirmExitOpen(true);
+              }}
+              title="Exit Active Match"
+              className="min-h-[38px] px-2.5 rounded-xl bg-slate-950/75 hover:bg-rose-950/85 border border-white/15 hover:border-rose-500/40 text-[10px] font-bold uppercase tracking-wider text-slate-200 hover:text-rose-200 flex items-center gap-1 transition-colors whitespace-nowrap"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Exit</span>
+            </button>
+          )}
         </div>
       </div>
 
-      {/* Suspect Grid (Compact 2-column grid fits up to 12 players without scroll) */}
+      {/* Suspect Grid */}
       <div className="flex-1 min-h-0 flex flex-col justify-between gap-1.5">
-        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain">
-          <div className="grid grid-cols-2 gap-1.5">
+        <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain pr-0.5">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
             {players.map((player) => {
               const badge = getBadgeInfo(player.badgeNumber);
               const playerIsDead = player.status !== 'alive';
@@ -266,6 +293,53 @@ export function MeetingScreen({
               <span>RESUME MISSION</span>
               <ArrowRight className="w-5 h-5" />
             </button>
+          </div>
+        </div>
+      )}
+
+      {confirmExitOpen && onExitMatch && (
+        <div
+          onClick={() => setConfirmExitOpen(false)}
+          className="fixed inset-0 z-50 bg-[#060913]/90 backdrop-blur-md flex items-center justify-center p-5"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-sm glass-card rounded-3xl p-5 space-y-4 border-rose-500/35 text-center"
+          >
+            <div className="w-12 h-12 rounded-2xl bg-rose-500/15 border border-rose-400/40 flex items-center justify-center mx-auto">
+              <LogOut className="w-6 h-6 text-rose-400" />
+            </div>
+            <div className="space-y-1.5">
+              <h3 className="font-display text-lg font-extrabold tracking-wide uppercase text-white">
+                Exit Active Match?
+              </h3>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                You will leave the meeting and room immediately. Remaining operatives will be notified live.
+              </p>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  playUiClick();
+                  setConfirmExitOpen(false);
+                }}
+                className="min-h-[44px] rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/15 text-xs font-bold uppercase tracking-wider text-slate-200 active:scale-95 transition-all"
+              >
+                Stay
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  playUiClick();
+                  setConfirmExitOpen(false);
+                  onExitMatch();
+                }}
+                className="min-h-[44px] rounded-xl bg-rose-600 hover:bg-rose-500 text-xs font-extrabold uppercase tracking-wider text-white shadow-[0_0_20px_rgba(244,63,94,0.35)] active:scale-95 transition-all"
+              >
+                Exit Match
+              </button>
+            </div>
           </div>
         </div>
       )}

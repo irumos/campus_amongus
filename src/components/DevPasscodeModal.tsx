@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Delete, Lock, ShieldCheck, X } from 'lucide-react';
 import {
   playErrorFeedback,
@@ -16,10 +16,14 @@ interface DevPasscodeModalProps {
 export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) {
   const [digits, setDigits] = useState('');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const submitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const submittedRef = useRef(false);
 
   const submitCode = useCallback(
     (candidate: string) => {
+      if (submittedRef.current) return;
       if (candidate === DEV_PASSCODE) {
+        submittedRef.current = true;
         playTaskSuccessFeedback();
         onSuccess();
       } else {
@@ -31,29 +35,42 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
     [onSuccess]
   );
 
-  const handleDigit = useCallback(
-    (d: string) => {
-      playUiClick();
-      setErrorMsg(null);
-      setDigits((prev) => {
-        if (prev.length >= DEV_PASSCODE.length) return prev;
-        const next = prev + d;
-        if (next.length === DEV_PASSCODE.length) {
-          setTimeout(() => submitCode(next), 90);
-        }
-        return next;
-      });
-    },
-    [submitCode]
-  );
+  useEffect(() => {
+    if (submitTimerRef.current) {
+      clearTimeout(submitTimerRef.current);
+      submitTimerRef.current = null;
+    }
+    if (digits.length === DEV_PASSCODE.length) {
+      submitTimerRef.current = setTimeout(() => {
+        submitCode(digits);
+      }, 90);
+    }
+    return () => {
+      if (submitTimerRef.current) {
+        clearTimeout(submitTimerRef.current);
+        submitTimerRef.current = null;
+      }
+    };
+  }, [digits, submitCode]);
+
+  const handleDigit = useCallback((d: string) => {
+    if (submittedRef.current) return;
+    playUiClick();
+    setErrorMsg(null);
+    setDigits((prev) =>
+      prev.length >= DEV_PASSCODE.length ? prev : prev + d
+    );
+  }, []);
 
   const handleBackspace = useCallback(() => {
+    if (submittedRef.current) return;
     playUiClick();
     setErrorMsg(null);
     setDigits((prev) => prev.slice(0, -1));
   }, []);
 
   const handleClear = useCallback(() => {
+    if (submittedRef.current) return;
     playUiClick();
     setErrorMsg(null);
     setDigits('');
@@ -83,10 +100,10 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
 
   return (
     <div className="fixed inset-0 z-50 bg-[#060913]/92 backdrop-blur-xl flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full max-w-md glass-card rounded-t-3xl sm:rounded-3xl p-5 space-y-4 border-cyan-400/25">
+      <div className="w-full max-w-md max-h-[94dvh] overflow-y-auto overscroll-contain glass-card rounded-t-3xl sm:rounded-3xl p-4 sm:p-5 space-y-3.5 sm:space-y-4 border-cyan-400/25">
         <div className="flex items-center justify-between gap-2">
           <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center">
+            <div className="w-9 h-9 rounded-xl bg-cyan-500/15 border border-cyan-400/40 flex items-center justify-center shrink-0">
               <Lock className="w-4 h-4 text-cyan-300" />
             </div>
             <div>
@@ -106,14 +123,14 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
               onClose();
             }}
             aria-label="Close passcode modal"
-            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/10 text-slate-300 hover:text-white"
+            className="min-h-[44px] min-w-[44px] flex items-center justify-center rounded-xl bg-white/10 text-slate-300 hover:text-white shrink-0"
           >
             <X className="w-5 h-5" />
           </button>
         </div>
 
         {/* 7-Slot Passcode Display */}
-        <div className="rounded-2xl bg-slate-950/80 border border-white/10 py-3.5 px-4 flex flex-col items-center gap-2">
+        <div className="rounded-2xl bg-slate-950/80 border border-white/10 py-3 px-4 flex flex-col items-center gap-2">
           <div className="flex items-center justify-center gap-2.5">
             {Array.from({ length: DEV_PASSCODE.length }).map((_, idx) => {
               const filled = idx < digits.length;
@@ -149,7 +166,7 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
               key={num}
               type="button"
               onClick={() => handleDigit(num)}
-              className="h-13 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border border-white/10 font-mono text-lg font-extrabold text-white active:scale-95 transition-all"
+              className="min-h-[44px] h-12 sm:h-13 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border border-white/10 font-mono text-lg font-extrabold text-white active:scale-95 transition-all"
             >
               {num}
             </button>
@@ -158,7 +175,7 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
           <button
             type="button"
             onClick={handleClear}
-            className="h-13 rounded-2xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 text-[11px] font-bold uppercase tracking-wider text-slate-400 active:scale-95 transition-all"
+            className="min-h-[44px] h-12 sm:h-13 rounded-2xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 text-[11px] font-bold uppercase tracking-wider text-slate-400 active:scale-95 transition-all"
           >
             Clear
           </button>
@@ -166,7 +183,7 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
           <button
             type="button"
             onClick={() => handleDigit('0')}
-            className="h-13 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border border-white/10 font-mono text-lg font-extrabold text-white active:scale-95 transition-all"
+            className="min-h-[44px] h-12 sm:h-13 rounded-2xl bg-slate-900/90 hover:bg-slate-800 border border-white/10 font-mono text-lg font-extrabold text-white active:scale-95 transition-all"
           >
             0
           </button>
@@ -175,7 +192,7 @@ export function DevPasscodeModal({ onSuccess, onClose }: DevPasscodeModalProps) 
             type="button"
             onClick={handleBackspace}
             aria-label="Backspace"
-            className="h-13 rounded-2xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 flex items-center justify-center text-slate-300 active:scale-95 transition-all"
+            className="min-h-[44px] h-12 sm:h-13 rounded-2xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 flex items-center justify-center text-slate-300 active:scale-95 transition-all"
           >
             <Delete className="w-5 h-5" />
           </button>
