@@ -1,0 +1,6 @@
+{
+  "name": "Campus Among Us IRL",
+  "description": "Mobile-first real-life college social deduction game with QR wristbands, campus task stations, sabotage alerts, emergency voting, and printable A4 QR kits.",
+  "requestFramePermissions": ["camera"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

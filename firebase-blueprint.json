@@ -1,0 +1,207 @@
+{
+  "entities": {
+    "RoomPlayer": {
+      "title": "RoomPlayer",
+      "description": "Public player entry stored inside the Room.players map. Strictly excludes secret roles.",
+      "type": "object",
+      "properties": {
+        "badgeId": {
+          "type": "string",
+          "description": "Physical wristband identifier (P01 through P16).",
+          "minLength": 3,
+          "maxLength": 4,
+          "pattern": "^P(0[1-9]|1[0-6])$"
+        },
+        "name": {
+          "type": "string",
+          "description": "Display name entered by the student.",
+          "minLength": 1,
+          "maxLength": 32
+        },
+        "color": {
+          "type": "string",
+          "description": "Hex color associated with the wristband badge.",
+          "minLength": 4,
+          "maxLength": 9,
+          "pattern": "^#[0-9a-fA-F]{6}$"
+        },
+        "isAlive": {
+          "type": "boolean",
+          "description": "Whether the player is still alive in the current match."
+        },
+        "hasVoted": {
+          "type": "boolean",
+          "description": "Whether the player has cast a vote in the active meeting."
+        }
+      },
+      "required": ["badgeId", "name", "color", "isAlive", "hasVoted"]
+    },
+    "MeetingInfo": {
+      "title": "MeetingInfo",
+      "description": "Active emergency meeting or body report metadata.",
+      "type": "object",
+      "properties": {
+        "callerBadgeId": {
+          "type": "string",
+          "description": "Wristband badge ID of the player who called the meeting.",
+          "pattern": "^P(0[1-9]|1[0-6])$",
+          "maxLength": 4
+        },
+        "bodyBadgeId": {
+          "type": "string",
+          "description": "Optional wristband badge ID of the eliminated player reported.",
+          "pattern": "^P(0[1-9]|1[0-6])$",
+          "maxLength": 4
+        },
+        "endsAt": {
+          "type": "number",
+          "description": "Epoch millisecond timestamp when discussion/voting concludes."
+        }
+      },
+      "required": ["callerBadgeId", "endsAt"]
+    },
+    "Room": {
+      "title": "Room",
+      "description": "Public match state for a Campus Among Us IRL room. Never stores player roles.",
+      "type": "object",
+      "properties": {
+        "status": {
+          "type": "string",
+          "description": "Current phase of the room.",
+          "enum": ["LOBBY", "PLAYING", "MEETING", "ENDED"],
+          "maxLength": 16
+        },
+        "winner": {
+          "type": "string",
+          "description": "Winning team when status is ENDED.",
+          "enum": ["CREWMATES", "IMPOSTORS"],
+          "maxLength": 16
+        },
+        "taskProgress": {
+          "type": "number",
+          "description": "Global team task completion percentage from 0 to 100."
+        },
+        "activeSabotage": {
+          "type": "string",
+          "description": "Currently active sabotage event, if any.",
+          "enum": ["REACTOR", "COMMS"],
+          "maxLength": 16
+        },
+        "sabotageExpiresAt": {
+          "type": "number",
+          "description": "Epoch millisecond timestamp when active sabotage expires."
+        },
+        "meetingInfo": {
+          "type": "object",
+          "$ref": "#/entities/MeetingInfo",
+          "description": "Active meeting payload when status is MEETING."
+        },
+        "ejectionResult": {
+          "type": "string",
+          "description": "Announcement summary after a meeting vote concludes.",
+          "maxLength": 200
+        },
+        "players": {
+          "type": "object",
+          "description": "Public players map keyed by badgeId containing ONLY { badgeId, name, color, isAlive, hasVoted }."
+        },
+        "impostorCount": {
+          "type": "number",
+          "description": "Configured number of Impostors for this match (1 to 4). Used to derive totalCrewmates without exposing individual roles."
+        },
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the room host.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "badgeOwners": {
+          "type": "object",
+          "description": "Map of badgeId -> Firebase Auth UID used for wristband ownership enforcement."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of the latest room mutation."
+        }
+      },
+      "required": ["status", "taskProgress", "players", "hostUid", "badgeOwners", "updatedAt"]
+    },
+    "PrivateRole": {
+      "title": "PrivateRole",
+      "description": "Private role and task assignment document isolated per wristband.",
+      "type": "object",
+      "properties": {
+        "role": {
+          "type": "string",
+          "description": "Secret player role.",
+          "enum": ["CREWMATE", "IMPOSTOR"],
+          "maxLength": 16
+        },
+        "fellowImpostors": {
+          "type": "array",
+          "description": "Badge IDs of fellow Impostors (empty for Crewmates)."
+        },
+        "assignedStations": {
+          "type": "array",
+          "description": "Station IDs assigned to this player (4 random stations from TASK_STATIONS)."
+        },
+        "completedStations": {
+          "type": "array",
+          "description": "Subset of assignedStations completed by this player."
+        }
+      },
+      "required": ["role", "fellowImpostors", "assignedStations", "completedStations"]
+    },
+    "Vote": {
+      "title": "Vote",
+      "description": "Emergency meeting vote cast by a living player.",
+      "type": "object",
+      "properties": {
+        "voterBadgeId": {
+          "type": "string",
+          "description": "Badge ID of the living player casting this vote.",
+          "pattern": "^P(0[1-9]|1[0-6])$",
+          "maxLength": 4
+        },
+        "targetBadgeId": {
+          "type": "string",
+          "description": "Suspect badge ID or SKIP.",
+          "pattern": "^(P(0[1-9]|1[0-6])|SKIP)$",
+          "maxLength": 4
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Room participant Auth UIDs authorized to tally votes."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the vote was cast."
+        }
+      },
+      "required": ["voterBadgeId", "targetBadgeId", "participantUids", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/rooms/{roomCode}": {
+      "schema": {
+        "$ref": "#/entities/Room"
+      },
+      "description": "Public game room document containing room status, sabotage, meeting state, and public player metadata (no roles)."
+    },
+    "/rooms/{roomCode}/privateRoles/{badgeId}": {
+      "schema": {
+        "$ref": "#/entities/PrivateRole"
+      },
+      "description": "Strictly isolated per-player secret role and assigned campus stations."
+    },
+    "/rooms/{roomCode}/votes/{badgeId}": {
+      "schema": {
+        "$ref": "#/entities/Vote"
+      },
+      "description": "Live emergency meeting votes cast by living players."
+    }
+  }
+}

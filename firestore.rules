@@ -1,0 +1,326 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- Hardened Primitives ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidRoomCode(code) {
+      return isValidId(code) && code.size() >= 4 && code.size() <= 12 && code.matches('^[A-Z0-9]+$');
+    }
+
+    function isValidBadgeId(badgeId) {
+      return isValidId(badgeId) && badgeId.size() <= 4 && badgeId.matches('^P(0[1-9]|1[0-6])$');
+    }
+
+    function getRoom(roomCode) {
+      return get(/databases/$(database)/documents/rooms/$(roomCode));
+    }
+
+    function getRoomAfter(roomCode) {
+      return getAfter(/databases/$(database)/documents/rooms/$(roomCode));
+    }
+
+    function isRoomMember(roomData) {
+      return roomData.hostUid == request.auth.uid ||
+        request.auth.uid in roomData.badgeOwners.values();
+    }
+
+    // --- Validation Blueprints ---
+    function isValidMeetingInfo(m) {
+      return m is map &&
+        m.keys().hasAll(['callerBadgeId', 'endsAt']) &&
+        m.keys().hasOnly(['callerBadgeId', 'bodyBadgeId', 'endsAt']) &&
+        isValidBadgeId(m.callerBadgeId) &&
+        (!('bodyBadgeId' in m) || m.bodyBadgeId == null || isValidBadgeId(m.bodyBadgeId)) &&
+        m.endsAt is number &&
+        m.endsAt >= 0;
+    }
+
+    function isValidRoom(data) {
+      return data.keys().hasAll(['status', 'taskProgress', 'players', 'hostUid', 'badgeOwners', 'updatedAt']) &&
+        data.keys().hasOnly([
+          'status',
+          'winner',
+          'taskProgress',
+          'activeSabotage',
+          'sabotageExpiresAt',
+          'meetingInfo',
+          'ejectionResult',
+          'impostorCount',
+          'players',
+          'hostUid',
+          'badgeOwners',
+          'updatedAt'
+        ]) &&
+        data.status is string &&
+        data.status.size() <= 16 &&
+        data.status in ['LOBBY', 'PLAYING', 'MEETING', 'ENDED'] &&
+        (!('winner' in data) || data.winner == null || (
+          data.winner is string &&
+          data.winner.size() <= 16 &&
+          data.winner in ['CREWMATES', 'IMPOSTORS']
+        )) &&
+        data.taskProgress is number &&
+        data.taskProgress >= 0 &&
+        data.taskProgress <= 100 &&
+        (!('activeSabotage' in data) || data.activeSabotage == null || (
+          data.activeSabotage is string &&
+          data.activeSabotage.size() <= 16 &&
+          data.activeSabotage in ['REACTOR', 'COMMS']
+        )) &&
+        (!('sabotageExpiresAt' in data) || data.sabotageExpiresAt == null || (
+          data.sabotageExpiresAt is number &&
+          data.sabotageExpiresAt >= 0
+        )) &&
+        (!('meetingInfo' in data) || data.meetingInfo == null || isValidMeetingInfo(data.meetingInfo)) &&
+        (!('ejectionResult' in data) || data.ejectionResult == null || (
+          data.ejectionResult is string &&
+          data.ejectionResult.size() <= 200
+        )) &&
+        (!('impostorCount' in data) || (
+          data.impostorCount is number &&
+          data.impostorCount >= 1 &&
+          data.impostorCount <= 4
+        )) &&
+        data.players is map &&
+        data.players.size() <= 16 &&
+        isValidId(data.hostUid) &&
+        data.badgeOwners is map &&
+        data.badgeOwners.size() <= 16 &&
+        data.updatedAt == request.time;
+    }
+
+    function isValidPrivateRole(data) {
+      return data.keys().hasAll(['role', 'fellowImpostors', 'assignedStations', 'completedStations']) &&
+        data.keys().hasOnly(['role', 'fellowImpostors', 'assignedStations', 'completedStations']) &&
+        data.role is string &&
+        data.role.size() <= 16 &&
+        data.role in ['CREWMATE', 'IMPOSTOR'] &&
+        data.fellowImpostors is list &&
+        data.fellowImpostors.size() <= 4 &&
+        (data.fellowImpostors.size() == 0 || isValidBadgeId(data.fellowImpostors[0])) &&
+        data.assignedStations is list &&
+        data.assignedStations.size() == 4 &&
+        data.assignedStations[0] is string &&
+        data.assignedStations[0].size() <= 32 &&
+        data.assignedStations.hasOnly(['ELECTRICAL', 'CYBER_LAB', 'RECEPTION', 'SEMINAR_1', 'COURTYARD']) &&
+        data.completedStations is list &&
+        data.completedStations.size() <= 4 &&
+        (data.completedStations.size() == 0 || (data.completedStations[0] is string && data.completedStations[0].size() <= 32)) &&
+        data.completedStations.hasOnly(data.assignedStations);
+    }
+
+    function isValidVote(data, badgeId) {
+      return data.keys().hasAll(['voterBadgeId', 'targetBadgeId', 'participantUids', 'updatedAt']) &&
+        data.keys().hasOnly(['voterBadgeId', 'targetBadgeId', 'participantUids', 'updatedAt']) &&
+        data.voterBadgeId == badgeId &&
+        isValidBadgeId(data.voterBadgeId) &&
+        data.targetBadgeId is string &&
+        data.targetBadgeId.size() <= 4 &&
+        data.targetBadgeId.matches('^(P(0[1-9]|1[0-6])|SKIP)$') &&
+        data.participantUids is list &&
+        data.participantUids.size() >= 1 &&
+        data.participantUids.size() <= 16 &&
+        isValidId(data.participantUids[0]) &&
+        request.auth.uid in data.participantUids &&
+        data.updatedAt == request.time;
+    }
+
+    // --- Rooms Public State (Strictly No Roles Stored) ---
+    match /rooms/{roomCode} {
+      allow get: if isVerifiedUser() && isValidRoomCode(roomCode);
+      allow list: if isVerifiedUser() && resource.data.hostUid == request.auth.uid;
+
+      allow create: if isVerifiedUser() &&
+        isValidRoomCode(roomCode) &&
+        isValidRoom(incoming()) &&
+        incoming().hostUid == request.auth.uid &&
+        incoming().status == 'LOBBY' &&
+        incoming().taskProgress == 0;
+
+      allow update: if isVerifiedUser() &&
+        isValidRoomCode(roomCode) &&
+        isValidRoom(incoming()) &&
+        incoming().hostUid == existing().hostUid &&
+        (existing().status != 'ENDED' || (existing().hostUid == request.auth.uid && incoming().status == 'LOBBY')) &&
+        (
+          // Action 1: Player Join / Re-sync Wristband in Lobby
+          (
+            existing().status == 'LOBBY' &&
+            incoming().status == 'LOBBY' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['players', 'badgeOwners', 'updatedAt'])
+          ) ||
+          // Action 1b: Host Configures Impostor Count in Lobby
+          (
+            existing().hostUid == request.auth.uid &&
+            existing().status == 'LOBBY' &&
+            incoming().status == 'LOBBY' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['impostorCount', 'updatedAt'])
+          ) ||
+          // Action 2: Host Starts Match (LOBBY -> PLAYING)
+          (
+            existing().hostUid == request.auth.uid &&
+            existing().status == 'LOBBY' &&
+            incoming().status == 'PLAYING' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status',
+              'winner',
+              'taskProgress',
+              'activeSabotage',
+              'sabotageExpiresAt',
+              'meetingInfo',
+              'ejectionResult',
+              'impostorCount',
+              'players',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 3: Active Match Updates (Task Progress, Sabotage, Meeting, Vote, Elimination, Tally)
+          (
+            isRoomMember(existing()) &&
+            existing().status in ['PLAYING', 'MEETING'] &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status',
+              'winner',
+              'taskProgress',
+              'activeSabotage',
+              'sabotageExpiresAt',
+              'meetingInfo',
+              'ejectionResult',
+              'players',
+              'updatedAt'
+            ])
+          ) ||
+          // Action 4: Host Resets Room Back to Lobby
+          (
+            existing().hostUid == request.auth.uid &&
+            incoming().status == 'LOBBY' &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'status',
+              'winner',
+              'taskProgress',
+              'activeSabotage',
+              'sabotageExpiresAt',
+              'meetingInfo',
+              'ejectionResult',
+              'players',
+              'updatedAt'
+            ])
+          )
+        );
+
+      allow delete: if isVerifiedUser() &&
+        isValidRoomCode(roomCode) &&
+        existing().hostUid == request.auth.uid;
+
+      // --- Strictly Isolated Private Role Documents ---
+      match /privateRoles/{badgeId} {
+        allow get: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          exists(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          getRoom(roomCode).data.badgeOwners[badgeId] == request.auth.uid;
+
+        allow list: if false;
+
+        allow create: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          isValidPrivateRole(incoming()) &&
+          existsAfter(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          getRoomAfter(roomCode).data.hostUid == request.auth.uid &&
+          getRoomAfter(roomCode).data.status == 'PLAYING';
+
+        allow update: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          isValidPrivateRole(incoming()) &&
+          (
+            // Host re-assigning roles atomically during match start
+            (
+              existsAfter(/databases/$(database)/documents/rooms/$(roomCode)) &&
+              getRoomAfter(roomCode).data.hostUid == request.auth.uid &&
+              getRoomAfter(roomCode).data.status == 'PLAYING' &&
+              incoming().diff(existing()).affectedKeys().hasOnly([
+                'role',
+                'fellowImpostors',
+                'assignedStations',
+                'completedStations'
+              ])
+            ) ||
+            // Player updating ONLY their own completedStations while playing
+            (
+              exists(/databases/$(database)/documents/rooms/$(roomCode)) &&
+              getRoom(roomCode).data.badgeOwners[badgeId] == request.auth.uid &&
+              getRoom(roomCode).data.status == 'PLAYING' &&
+              incoming().role == existing().role &&
+              incoming().fellowImpostors == existing().fellowImpostors &&
+              incoming().assignedStations == existing().assignedStations &&
+              incoming().diff(existing()).affectedKeys().hasOnly(['completedStations'])
+            )
+          );
+
+        allow delete: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          exists(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          getRoom(roomCode).data.hostUid == request.auth.uid;
+      }
+
+      // --- Emergency Meeting Live Votes ---
+      match /votes/{badgeId} {
+        allow get: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          exists(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          isRoomMember(getRoom(roomCode).data);
+
+        allow list: if isVerifiedUser() &&
+          request.auth.uid in resource.data.participantUids;
+
+        allow create: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          isValidVote(incoming(), badgeId) &&
+          exists(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          getRoom(roomCode).data.badgeOwners[badgeId] == request.auth.uid &&
+          getRoom(roomCode).data.status == 'MEETING' &&
+          getRoom(roomCode).data.players[badgeId].isAlive == true &&
+          getRoom(roomCode).data.players[badgeId].hasVoted == false &&
+          existsAfter(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          getRoomAfter(roomCode).data.players[badgeId].hasVoted == true;
+
+        allow update: if false;
+
+        allow delete: if isVerifiedUser() &&
+          isValidRoomCode(roomCode) &&
+          isValidBadgeId(badgeId) &&
+          exists(/databases/$(database)/documents/rooms/$(roomCode)) &&
+          isRoomMember(getRoom(roomCode).data);
+      }
+    }
+  }
+}
