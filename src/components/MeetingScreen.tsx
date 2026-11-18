@@ -35,7 +35,8 @@ export function MeetingScreen({
     ? Math.max(0, Math.ceil((meeting.endsAt - now) / 1000))
     : 45;
   const timerRatio = Math.min(1, secondsLeft / 60);
-  const formattedTime = `00:${String(secondsLeft).padStart(2, '0')}`;
+  const formattedTime =
+    secondsLeft === 0 ? 'TALLY' : `00:${String(secondsLeft).padStart(2, '0')}`;
 
   const livingCount = players.filter((p) => p.status === 'alive').length;
   const votedCount = meeting ? Object.keys(meeting.votes).length : 0;
@@ -43,8 +44,12 @@ export function MeetingScreen({
   const hasVoted = Boolean(myVote);
 
   const selectedPlayer = selectedId
-    ? players.find((p) => p.id === selectedId) || null
+    ? players.find((p) => p.id === selectedId && p.status === 'alive') || null
     : null;
+
+  useEffect(() => {
+    setSelectedId(null);
+  }, [meeting?.endsAt, hasVoted]);
 
   const ejectionFullText = meeting?.ejectionResult
     ? meeting.ejectionResult.ejectedBadgeNumber
@@ -132,7 +137,7 @@ export function MeetingScreen({
                     playUiClick();
                     setSelectedId(player.id);
                   }}
-                  className={`rounded-xl px-2.5 py-2 border-2 transition-all flex items-center gap-2 text-left ${
+                  className={`min-h-[58px] rounded-xl px-2.5 py-2 border-2 transition-all flex items-center gap-2 text-left ${
                     playerIsDead
                       ? 'bg-slate-900/40 border-violet-500/20 opacity-45 cursor-not-allowed'
                       : isSelected || isMyTarget
@@ -232,7 +237,7 @@ export function MeetingScreen({
               className="h-14 rounded-xl bg-slate-800 hover:bg-slate-700 border border-white/15 text-white font-display font-extrabold text-xs tracking-wider uppercase flex items-center justify-center gap-1.5 px-2 active:scale-95 transition-all"
             >
               <SkipForward className="w-4 h-4 shrink-0" />
-              <span>[SKIP VOTE]</span>
+              <span>Skip Vote</span>
             </button>
           </div>
         )}

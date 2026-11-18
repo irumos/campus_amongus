@@ -1,28 +1,43 @@
 import { useState } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
-import { ArrowLeft, MapPin, Printer, Scissors } from 'lucide-react';
-import { TASK_STATIONS, WRISTBANDS } from '../config/campusConfig';
+import { ArrowLeft, Lock, MapPin, Printer, Scissors } from 'lucide-react';
+import { WRISTBANDS } from '../config/campusConfig';
+import { useCampusStations } from '../config/stationStore';
 
 interface PrintKitScreenProps {
+  unlockedRoomCode?: string | null;
+  onLockPrintKit?: () => void;
   onBack: () => void;
 }
 
-export function PrintKitScreen({ onBack }: PrintKitScreenProps) {
+export function PrintKitScreen({
+  unlockedRoomCode,
+  onLockPrintKit,
+  onBack,
+}: PrintKitScreenProps) {
   const [activeTab, setActiveTab] = useState<'wristbands' | 'stations'>('wristbands');
+  const stations = useCampusStations();
 
   return (
     <div className="min-h-screen bg-white text-slate-950">
       {/* Sticky Print Toolbar (hidden during printing) */}
       <div className="print:hidden sticky top-0 z-30 bg-slate-950 text-white border-b border-slate-800 px-4 py-3">
         <div className="max-w-4xl mx-auto flex flex-wrap items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={onBack}
-            className="min-h-[40px] px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-bold flex items-center gap-1.5"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            <span>Back to App</span>
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={onBack}
+              className="min-h-[40px] px-3 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-800 text-xs font-bold flex items-center gap-1.5"
+            >
+              <ArrowLeft className="w-4 h-4" />
+              <span>Back to App</span>
+            </button>
+            {unlockedRoomCode && (
+              <span className="px-2.5 py-1 rounded-lg bg-emerald-500/15 border border-emerald-500/35 text-[11px] font-mono font-bold text-emerald-300">
+                LOBBY: {unlockedRoomCode}
+              </span>
+            )}
+          </div>
 
           <div className="flex items-center gap-1 bg-slate-900 p-1 rounded-xl border border-slate-800">
             <button
@@ -45,18 +60,30 @@ export function PrintKitScreen({ onBack }: PrintKitScreenProps) {
                   : 'text-slate-400 hover:text-white'
               }`}
             >
-              Room Posters (5 Stations)
+              Room Posters ({stations.length} Stations)
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => window.print()}
-            className="min-h-[40px] px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold flex items-center gap-2"
-          >
-            <Printer className="w-4 h-4" />
-            <span>Print QRs</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {onLockPrintKit && (
+              <button
+                type="button"
+                onClick={onLockPrintKit}
+                className="min-h-[40px] px-3 rounded-xl bg-slate-900 hover:bg-rose-950 border border-slate-800 hover:border-rose-500/40 text-slate-300 hover:text-rose-200 text-xs font-bold flex items-center gap-1.5"
+              >
+                <Lock className="w-3.5 h-3.5" />
+                <span>Lock</span>
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="min-h-[40px] px-4 rounded-xl bg-emerald-500 hover:bg-emerald-400 text-slate-950 text-xs font-extrabold flex items-center gap-2"
+            >
+              <Printer className="w-4 h-4" />
+              <span>Print QRs</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -161,7 +188,7 @@ export function PrintKitScreen({ onBack }: PrintKitScreenProps) {
           <div className="space-y-5">
             <div className="border-b-2 border-slate-900 pb-2">
               <h1 className="font-display text-lg font-extrabold tracking-wide uppercase text-slate-950">
-                CAMPUS AMONG US IRL — ROOM STATION QR POSTERS (5 STATIONS)
+                CAMPUS AMONG US IRL — ROOM STATION QR POSTERS ({stations.length} STATIONS)
               </h1>
               <p className="text-[11px] text-slate-600">
                 Print on A4 and tape each poster visibly outside the matching campus room door.
@@ -169,7 +196,7 @@ export function PrintKitScreen({ onBack }: PrintKitScreenProps) {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 print:grid-cols-2 gap-5">
-              {TASK_STATIONS.map((station) => (
+              {stations.map((station) => (
                 <div
                   key={station.id}
                   className="border-4 border-slate-900 rounded-2xl p-6 flex flex-col items-center text-center justify-between gap-4 bg-white break-inside-avoid"

@@ -2,7 +2,10 @@ import {
   TASK_STATIONS as CAMPUS_TASK_STATIONS,
   WRISTBANDS,
   type CampusMiniGameType,
+  type CampusTaskCategory,
+  type CampusTaskStationConfig,
 } from '../config/campusConfig.ts';
+import { getActiveStations } from '../config/stationStore.ts';
 
 export type ScreenId = 'join' | 'lobby' | 'gameplay' | 'meeting' | 'print';
 
@@ -10,7 +13,16 @@ export type PlayerRole = 'crewmate' | 'impostor';
 
 export type PlayerStatus = 'alive' | 'eliminated' | 'ghost';
 
-export type MiniGameType = 'wiring' | 'manifold' | 'swipe' | 'shields';
+export type MiniGameType =
+  | 'wiring'
+  | 'manifold'
+  | 'swipe'
+  | 'shields'
+  | 'simon_says'
+  | 'frequency_tune'
+  | 'asteroid_defense'
+  | 'biometric_hold'
+  | 'data_transfer';
 
 export interface WristbandBadge {
   id: string;
@@ -27,6 +39,9 @@ export interface TaskStation {
   taskName: string;
   shortLabel: string;
   miniGame: MiniGameType;
+  taskCategory: CampusTaskCategory;
+  relayStage?: 1 | 2;
+  relayPartnerId?: string;
   qrValue: string;
 }
 
@@ -80,7 +95,7 @@ export interface RoomState {
   updatedAt: number;
 }
 
-function mapMiniGame(type: CampusMiniGameType): MiniGameType {
+export function mapMiniGame(type: CampusMiniGameType): MiniGameType {
   switch (type) {
     case 'WIRING':
       return 'wiring';
@@ -90,7 +105,31 @@ function mapMiniGame(type: CampusMiniGameType): MiniGameType {
       return 'swipe';
     case 'SHIELDS':
       return 'shields';
+    case 'SIMON_SAYS':
+      return 'simon_says';
+    case 'FREQUENCY_TUNE':
+      return 'frequency_tune';
+    case 'ASTEROID_DEFENSE':
+      return 'asteroid_defense';
+    case 'BIOMETRIC_HOLD':
+      return 'biometric_hold';
+    case 'DATA_TRANSFER':
+      return 'data_transfer';
   }
+}
+
+export function toTaskStation(s: CampusTaskStationConfig): TaskStation {
+  return {
+    id: s.id,
+    location: s.roomName.toUpperCase(),
+    taskName: s.taskTitle,
+    shortLabel: s.roomName,
+    miniGame: mapMiniGame(s.miniGame),
+    taskCategory: s.taskCategory || 'SHORT_TASK',
+    relayStage: s.relayStage,
+    relayPartnerId: s.relayPartnerId,
+    qrValue: s.qrPayload,
+  };
 }
 
 export const WRISTBAND_BADGES: WristbandBadge[] = WRISTBANDS.map((w) => ({
@@ -102,14 +141,7 @@ export const WRISTBAND_BADGES: WristbandBadge[] = WRISTBANDS.map((w) => ({
   qrValue: w.qrPayload,
 }));
 
-export const TASK_STATIONS: TaskStation[] = CAMPUS_TASK_STATIONS.map((s) => ({
-  id: s.id,
-  location: s.roomName.toUpperCase(),
-  taskName: s.taskTitle,
-  shortLabel: s.roomName,
-  miniGame: mapMiniGame(s.miniGame),
-  qrValue: s.qrPayload,
-}));
+export const TASK_STATIONS: TaskStation[] = CAMPUS_TASK_STATIONS.map(toTaskStation);
 
 export function getBadgeInfo(badgeNumber: string): WristbandBadge {
   return (
@@ -118,15 +150,17 @@ export function getBadgeInfo(badgeNumber: string): WristbandBadge {
 }
 
 export function getStationInfo(stationId: string): TaskStation | undefined {
-  return TASK_STATIONS.find((s) => s.id === stationId);
+  const active = getActiveStations().map(toTaskStation);
+  return active.find((s) => s.id === stationId);
 }
 
 export function parseQrPayload(
   raw: string
 ): { kind: 'badge'; badgeNumber: string } | { kind: 'station'; stationId: string } | null {
   const trimmed = raw.trim();
+  const activeStations = getActiveStations();
 
-  // Primary CAMPUS_AU payloads from campusConfig.ts
+  // Primary CAMPUS_AU payloads from campusConfig / stationStore
   if (trimmed.startsWith('CAMPUS_AU:WRISTBAND:')) {
     const code = trimmed.replace('CAMPUS_AU:WRISTBAND:', '').toUpperCase();
     const matched = WRISTBAND_BADGES.find((b) => b.id === code);
@@ -136,7 +170,7 @@ export function parseQrPayload(
   }
   if (trimmed.startsWith('CAMPUS_AU:STATION:')) {
     const stationId = trimmed.replace('CAMPUS_AU:STATION:', '').toUpperCase();
-    if (TASK_STATIONS.some((s) => s.id === stationId)) {
+    if (activeStations.some((s) => s.id === stationId)) {
       return { kind: 'station', stationId };
     }
   }
@@ -151,7 +185,7 @@ export function parseQrPayload(
   if (trimmed.startsWith('CAIRL:STATION:')) {
     const legacyId = trimmed.replace('CAIRL:STATION:', '').toUpperCase();
     const mappedId = legacyId === 'SEMINAR_HALL' ? 'SEMINAR_1' : legacyId;
-    if (TASK_STATIONS.some((s) => s.id === mappedId)) {
+    if (activeStations.some((s) => s.id === mappedId)) {
       return { kind: 'station', stationId: mappedId };
     }
   }

@@ -1,4 +1,15 @@
-export type CampusMiniGameType = 'WIRING' | 'MANIFOLD' | 'SWIPE' | 'SHIELDS';
+export type CampusMiniGameType =
+  | 'WIRING'
+  | 'MANIFOLD'
+  | 'SWIPE'
+  | 'SHIELDS'
+  | 'SIMON_SAYS'
+  | 'FREQUENCY_TUNE'
+  | 'ASTEROID_DEFENSE'
+  | 'BIOMETRIC_HOLD'
+  | 'DATA_TRANSFER';
+
+export type CampusTaskCategory = 'SHORT_TASK' | 'LONG_TASK';
 
 export interface CampusWristbandConfig {
   id: string;
@@ -14,6 +25,9 @@ export interface CampusTaskStationConfig {
   roomName: string;
   taskTitle: string;
   miniGame: CampusMiniGameType;
+  taskCategory: CampusTaskCategory;
+  relayStage?: 1 | 2;
+  relayPartnerId?: string;
   qrPayload: string;
 }
 
@@ -57,13 +71,15 @@ export const TASK_STATIONS: CampusTaskStationConfig[] = [
     roomName: 'Ground Floor • Electrical',
     taskTitle: 'Connect Power Conduits',
     miniGame: 'WIRING',
+    taskCategory: 'SHORT_TASK',
     qrPayload: 'CAMPUS_AU:STATION:ELECTRICAL',
   },
   {
     id: 'CYBER_LAB',
     roomName: '2nd Floor • Cyber Lab',
-    taskTitle: 'Unlock Security Manifold',
-    miniGame: 'MANIFOLD',
+    taskTitle: 'Reactor Memory Sequence',
+    miniGame: 'SIMON_SAYS',
+    taskCategory: 'SHORT_TASK',
     qrPayload: 'CAMPUS_AU:STATION:CYBER_LAB',
   },
   {
@@ -71,6 +87,7 @@ export const TASK_STATIONS: CampusTaskStationConfig[] = [
     roomName: 'Main Lobby • Reception',
     taskTitle: 'Verify Student ID Swipe',
     miniGame: 'SWIPE',
+    taskCategory: 'SHORT_TASK',
     qrPayload: 'CAMPUS_AU:STATION:RECEPTION',
   },
   {
@@ -78,13 +95,59 @@ export const TASK_STATIONS: CampusTaskStationConfig[] = [
     roomName: '1st Floor • Seminar Hall 1',
     taskTitle: 'Calibrate Firewall Nodes',
     miniGame: 'SHIELDS',
+    taskCategory: 'SHORT_TASK',
     qrPayload: 'CAMPUS_AU:STATION:SEMINAR_1',
   },
   {
     id: 'COURTYARD',
     roomName: 'Open Quad • Courtyard Gazebo',
-    taskTitle: 'Stabilize Relay Uplink',
-    miniGame: 'MANIFOLD',
+    taskTitle: 'Calibrate Comms Antenna',
+    miniGame: 'FREQUENCY_TUNE',
+    taskCategory: 'SHORT_TASK',
     qrPayload: 'CAMPUS_AU:STATION:COURTYARD',
+  },
+  {
+    id: 'CENTRAL_LIBRARY',
+    roomName: '1st Floor • Central Library',
+    taskTitle: 'Download Campus Logs',
+    miniGame: 'DATA_TRANSFER',
+    taskCategory: 'LONG_TASK',
+    relayStage: 1,
+    relayPartnerId: 'SERVER_ROOM',
+    qrPayload: 'CAMPUS_AU:STATION:CENTRAL_LIBRARY',
+  },
+  {
+    id: 'PHYSICS_LAB',
+    roomName: '2nd Floor • Physics Lab',
+    taskTitle: 'Verify Lab Access',
+    miniGame: 'BIOMETRIC_HOLD',
+    taskCategory: 'SHORT_TASK',
+    qrPayload: 'CAMPUS_AU:STATION:PHYSICS_LAB',
+  },
+  {
+    id: 'CANTEEN_QUAD',
+    roomName: 'Ground Floor • Canteen Quad',
+    taskTitle: 'Clear Campus Firewall',
+    miniGame: 'ASTEROID_DEFENSE',
+    taskCategory: 'SHORT_TASK',
+    qrPayload: 'CAMPUS_AU:STATION:CANTEEN_QUAD',
+  },
+  {
+    id: 'SERVER_ROOM',
+    roomName: 'Basement • Server Room',
+    taskTitle: 'Upload Logs to Server',
+    miniGame: 'DATA_TRANSFER',
+    taskCategory: 'LONG_TASK',
+    relayStage: 2,
+    relayPartnerId: 'CENTRAL_LIBRARY',
+    qrPayload: 'CAMPUS_AU:STATION:SERVER_ROOM',
+  },
+  {
+    id: 'MAIN_STAIRWELL',
+    roomName: '3rd Floor • Main Stairwell',
+    taskTitle: 'Unlock Security Manifold',
+    miniGame: 'MANIFOLD',
+    taskCategory: 'SHORT_TASK',
+    qrPayload: 'CAMPUS_AU:STATION:MAIN_STAIRWELL',
   },
 ];

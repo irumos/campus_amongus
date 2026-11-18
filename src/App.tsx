@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  TASK_STATIONS,
   getStationInfo,
+  toTaskStation,
   type MeetingState,
   type Player,
   type PlayerRole,
@@ -10,10 +10,12 @@ import {
   type ScreenId,
   type TaskStation,
 } from './shared/gameData';
+import { useCampusStations } from './config/stationStore';
 import {
   badgeIdToNumber,
   normalizeBadgeId,
   normalizeRoomCode,
+  resolveSabotageTargets,
   useCampusGame,
 } from './hooks/useCampusGame';
 import {
@@ -32,6 +34,7 @@ import { MeetingScreen } from './components/MeetingScreen';
 import { PrintKitScreen } from './components/PrintKitScreen';
 import { QrScannerModal, type ScannerMode } from './components/QrScannerModal';
 import { MiniGameModal } from './components/MiniGameModal';
+import { PrintKitPasscodeModal } from './components/PrintKitPasscodeModal';
 
 const LS_KEYS = {
   NAME: 'cairl_name',
@@ -39,6 +42,7 @@ const LS_KEYS = {
   BADGE: 'cairl_badge',
   DEV_OVERRIDES: 'cairl_dev_overrides',
   DEV_UNLOCKED: 'cairl_dev_unlocked',
+  PRINT_UNLOCKED_ROOM: 'cairl_print_unlocked_room',
 } as const;
 
 function readJsonFromStorage<T>(key: string): T | null {
@@ -69,6 +73,7 @@ export default function App() {
 
   const {
     isSupabaseConfigured,
+    supabaseConfigStatus,
     realtimeConnected,
     connectionStatus,
     reconnectAttempt,
@@ -76,6 +81,7 @@ export default function App() {
     syncError,
     insightEvents,
     clearInsightEvents,
+    recentLobbies,
     identity,
     room,
     publicPlayers,
@@ -86,6 +92,11 @@ export default function App() {
     setGhostModeActive,
     isCommsSabotaged,
     joinRoom,
+    createLobby,
+    switchLobby,
+    addCandidate,
+    removeCandidate,
+    toggleCandidateAlive,
     seedDemoPlayers,
     setImpostorCount,
     startMatch,
@@ -98,7 +109,10 @@ export default function App() {
     finalizeMeeting,
     dismissEjection,
     resetRoom,
+    leaveRoom,
   } = useCampusGame();
+
+  const campusStations = useCampusStations();
 
   const [name, setName] = useState(
     () => identity?.name || localStorage.getItem(LS_KEYS.NAME) || ''
@@ -141,17 +155,42 @@ export default function App() {
 
   // Modals & Notifications
   const [scannerMode, setScannerMode] = useState<ScannerMode | null>(null);
+  const [targetStationId, setTargetStationId] = useState<string | null>(null);
   const [activeMiniGameStation, setActiveMiniGameStation] =
     useState<TaskStation | null>(null);
+  const [fakeCompletedIds, setFakeCompletedIds] = useState<string[]>([]);
   const [showPasscodeModal, setShowPasscodeModal] = useState(false);
+  const [showPrintPasscodeModal, setShowPrintPasscodeModal] = useState(false);
+  const [unlockedPrintRoomCode, setUnlockedPrintRoomCode] = useState<string | null>(
+    () => {
+      try {
+        return sessionStorage.getItem(LS_KEYS.PRINT_UNLOCKED_ROOM) || null;
+      } catch {
+        return null;
+      }
+    }
+  );
   const [showInsightsModal, setShowInsightsModal] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const showToast = useCallback((msg: string) => {
+  const showToast = useCallback((msg: string, durationMs = 2600) => {
     setToastMessage(msg);
-    setTimeout(() => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = setTimeout(() => {
       setToastMessage((cur) => (cur === msg ? null : cur));
-    }, 2600);
+    }, durationMs);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
+    };
   }, []);
 
   const handleUnlockSuccess = useCallback(() => {
@@ -169,14 +208,19 @@ export default function App() {
   const handleLockDevMode = useCallback(() => {
     try {
       sessionStorage.removeItem(LS_KEYS.DEV_UNLOCKED);
+      sessionStorage.removeItem(LS_KEYS.PRINT_UNLOCKED_ROOM);
     } catch {
       // ignore storage errors
     }
     setIsDevUnlocked(false);
+    setUnlockedPrintRoomCode(null);
     setShowInsightsModal(false);
     setRoleOverride(null);
     setStatusOverride(null);
-    setScreenOverride((cur) => (cur === 'print' ? 'print' : null));
+    setScreenOverride(null);
+    if (window.location.pathname === '/print') {
+      window.history.pushState({}, '', '/');
+    }
   }, []);
 
   // Persist draft credentials & debug overrides
@@ -268,26 +312,64 @@ export default function App() {
   const effectiveStatus: PlayerStatus =
     statusOverride ?? myPlayer?.status ?? 'alive';
 
+  // Adapt myPlayer completedTaskIds cleanly for Impostor disguise cover
+  const displayMyPlayer: Player | null = useMemo(() => {
+    if (!myPlayer) return null;
+    if (effectiveRole !== 'impostor') return myPlayer;
+    return {
+      ...myPlayer,
+      completedTaskIds: fakeCompletedIds,
+    };
+  }, [myPlayer, effectiveRole, fakeCompletedIds]);
+
+  // Reset fake checklist when returning to Lobby or starting a fresh match; close overlays on Meeting/End
+  const prevRoomStatusRef = useRef<string | null>(null);
+  useEffect(() => {
+    const status = room?.status ?? null;
+    if (
+      status === 'LOBBY' ||
+      (status === 'PLAYING' &&
+        (prevRoomStatusRef.current === 'LOBBY' ||
+          prevRoomStatusRef.current === 'ENDED'))
+    ) {
+      setFakeCompletedIds([]);
+    }
+    if (status === 'MEETING' || status === 'ENDED') {
+      setScannerMode(null);
+      setTargetStationId(null);
+      setActiveMiniGameStation(null);
+    }
+    prevRoomStatusRef.current = status;
+  }, [room?.status]);
+
+  const sabotageTargets = useMemo(
+    () => resolveSabotageTargets(campusStations),
+    [campusStations]
+  );
+
   const uiSabotage: SabotageState | null = useMemo(() => {
     if (!room?.active_sabotage) return null;
     if (room.active_sabotage === 'REACTOR') {
       const expiresAt = room.sabotage_ends_at || Date.now() + 45_000;
       return {
         type: 'reactor',
-        label: 'REACTOR MELTDOWN — SCAN CYBER LAB QR',
-        targetStationId: 'CYBER_LAB',
+        label: `REACTOR MELTDOWN · ${sabotageTargets.reactorLabel.toUpperCase()}`,
+        targetStationId: sabotageTargets.reactorStationId,
         triggeredAt: expiresAt - 45_000,
         expiresAt,
       };
     }
     return {
       type: 'comms',
-      label: 'COMMS JAMMED — SCAN CYBER LAB OR RECEPTION QR',
-      targetStationId: 'RECEPTION',
+      label: `COMMS JAMMED · SCAN ${sabotageTargets.commsLabel.toUpperCase()}`,
+      targetStationId:
+        sabotageTargets.commsStationIds[1] ||
+        sabotageTargets.commsStationIds[0] ||
+        sabotageTargets.reactorStationId,
       triggeredAt: Date.now(),
       expiresAt: Date.now() + 60_000,
     };
-  }, [room?.active_sabotage, room?.sabotage_ends_at]);
+  }, [room?.active_sabotage, room?.sabotage_ends_at, sabotageTargets]);
 
   const uiMeeting: MeetingState | null = useMemo(() => {
     if (!room || room.status !== 'MEETING') return null;
@@ -359,6 +441,44 @@ export default function App() {
     }
   }, [identity, name, badgeNumber, roomCode, joinRoom]);
 
+  const handleOpenPrintKitRequest = useCallback(() => {
+    const currentLobby = normalizeRoomCode(identity?.roomCode || roomCode);
+    if (unlockedPrintRoomCode === currentLobby) {
+      navigateScreen('print');
+      return;
+    }
+    setShowPrintPasscodeModal(true);
+  }, [identity?.roomCode, roomCode, unlockedPrintRoomCode, navigateScreen]);
+
+  const handlePrintPasscodeSuccess = useCallback(
+    (verifiedRoomCode: string) => {
+      try {
+        sessionStorage.setItem(LS_KEYS.PRINT_UNLOCKED_ROOM, verifiedRoomCode);
+      } catch {
+        // ignore storage errors
+      }
+      setUnlockedPrintRoomCode(verifiedRoomCode);
+      setShowPrintPasscodeModal(false);
+      navigateScreen('print');
+      showToast(`Printable QR Kit Unlocked (${verifiedRoomCode})`);
+    },
+    [navigateScreen, showToast]
+  );
+
+  const handleLockPrintKit = useCallback(() => {
+    try {
+      sessionStorage.removeItem(LS_KEYS.PRINT_UNLOCKED_ROOM);
+    } catch {
+      // ignore storage errors
+    }
+    setUnlockedPrintRoomCode(null);
+    setScreenOverride(identity ? null : 'join');
+    if (window.location.pathname === '/print') {
+      window.history.pushState({}, '', '/');
+    }
+    showToast('Printable QR Kit Locked');
+  }, [identity, showToast]);
+
   const handleSelectDevPreset = useCallback(
     async (preset: DevPresetId) => {
       if (preset !== 'join' && preset !== 'print') {
@@ -401,22 +521,42 @@ export default function App() {
           navigateScreen('meeting');
           break;
         case 'print':
-          navigateScreen('print');
+          handleOpenPrintKitRequest();
           break;
       }
     },
-    [ensureJoinedForDev, navigateScreen, room?.status, callMeeting]
+    [
+      ensureJoinedForDev,
+      navigateScreen,
+      room?.status,
+      callMeeting,
+      handleOpenPrintKitRequest,
+    ]
   );
 
-  const handleJoinLobby = async () => {
+  const handleJoinLobby = async (forceLocal = false) => {
     if (!name.trim() || !badgeNumber) return;
+    setJoinError(null);
     try {
-      await joinRoom(roomCode, normalizeBadgeId(`P${badgeNumber}`), name.trim());
+      await joinRoom(
+        roomCode,
+        normalizeBadgeId(`P${badgeNumber}`),
+        name.trim(),
+        forceLocal ? { forceLocal: true } : undefined
+      );
       setScreenOverride(null);
       playTaskSuccessFeedback();
-    } catch {
+      if (forceLocal) {
+        showToast('Joined in Local Offline Mode');
+      }
+    } catch (err) {
+      const msg =
+        err instanceof Error && err.message
+          ? err.message
+          : 'Unable to join Supabase room. Check credentials.';
+      setJoinError(msg);
       playErrorFeedback();
-      showToast('Unable to join Supabase room. Check credentials.');
+      showToast(msg);
     }
   };
 
@@ -447,10 +587,10 @@ export default function App() {
       const ok = await eliminatePlayer(normalizeBadgeId(`P${scannedBadge}`));
       if (ok) {
         playErrorFeedback();
-        showToast(`Eliminated Badge #${scannedBadge}`);
+        showToast(`Target #${scannedBadge} Tagged`, 1100);
       } else {
         playErrorFeedback();
-        showToast('Elimination blocked (cooldown or invalid target).');
+        showToast('Elimination blocked (cooldown or invalid target).', 1500);
       }
       return;
     }
@@ -466,18 +606,19 @@ export default function App() {
   const handleScanStationResult = async (stationId: string) => {
     const station = getStationInfo(stationId);
     setScannerMode(null);
+    setTargetStationId(null);
     if (!station) return;
 
     if (
       room?.active_sabotage === 'REACTOR' &&
-      station.id === 'CYBER_LAB'
+      station.id === sabotageTargets.reactorStationId
     ) {
       await clearSabotage(station.id);
       playTaskSuccessFeedback();
       showToast('Reactor Meltdown Defused!');
     } else if (
       room?.active_sabotage === 'COMMS' &&
-      (station.id === 'CYBER_LAB' || station.id === 'RECEPTION')
+      sabotageTargets.commsStationIds.includes(station.id)
     ) {
       await clearSabotage(station.id);
       playTaskSuccessFeedback();
@@ -489,6 +630,12 @@ export default function App() {
 
   const handleCompleteMiniGame = async (stationId: string) => {
     setActiveMiniGameStation(null);
+    if (effectiveRole === 'impostor') {
+      setFakeCompletedIds((prev) =>
+        prev.includes(stationId) ? prev : [...prev, stationId]
+      );
+      return;
+    }
     await completeStation(stationId);
   };
 
@@ -496,15 +643,20 @@ export default function App() {
     if (privateRole?.assigned_stations?.length) {
       return privateRole.assigned_stations;
     }
-    return TASK_STATIONS.map((s) => s.id);
-  }, [privateRole?.assigned_stations]);
+    return campusStations.map((s) => s.id);
+  }, [privateRole?.assigned_stations, campusStations]);
 
-  const activeSabotageStationId =
-    room?.active_sabotage === 'REACTOR'
-      ? 'CYBER_LAB'
-      : room?.active_sabotage === 'COMMS'
-      ? 'RECEPTION'
-      : null;
+  const activeSabotageStationIds = useMemo(() => {
+    if (room?.active_sabotage === 'REACTOR') {
+      return [sabotageTargets.reactorStationId];
+    }
+    if (room?.active_sabotage === 'COMMS') {
+      return sabotageTargets.commsStationIds;
+    }
+    return [];
+  }, [room?.active_sabotage, sabotageTargets]);
+
+  const activeSabotageStationId = activeSabotageStationIds[0] || null;
 
   const isConnectionHealthy = identity
     ? realtimeConnected
@@ -517,6 +669,23 @@ export default function App() {
     : 'disconnected';
 
   if (activeScreen === 'print') {
+    if (!unlockedPrintRoomCode) {
+      return (
+        <div className="tactical-bg h-dvh overflow-hidden text-white">
+          <PrintKitPasscodeModal
+            initialRoomCode={identity?.roomCode || roomCode}
+            onSuccess={handlePrintPasscodeSuccess}
+            onClose={() => {
+              setScreenOverride(identity ? null : 'join');
+              if (window.location.pathname === '/print') {
+                window.history.pushState({}, '', '/');
+              }
+            }}
+          />
+        </div>
+      );
+    }
+
     return (
       <>
         <DevSwitcherBar
@@ -535,6 +704,8 @@ export default function App() {
           }}
         />
         <PrintKitScreen
+          unlockedRoomCode={unlockedPrintRoomCode}
+          onLockPrintKit={handleLockPrintKit}
           onBack={() => {
             setScreenOverride(identity ? null : 'join');
             if (window.location.pathname === '/print') {
@@ -546,10 +717,25 @@ export default function App() {
     );
   }
 
+  const showPhantomAtmosphere =
+    activeScreen === 'gameplay' &&
+    !uiWinner &&
+    (effectiveStatus === 'eliminated' || effectiveStatus === 'ghost');
+
   return (
-    <div className="tactical-bg h-dvh overflow-hidden text-white">
+    <div className="tactical-bg h-dvh overflow-hidden text-white relative">
+      {showPhantomAtmosphere && (
+        <div
+          aria-hidden="true"
+          className={`pointer-events-none fixed inset-0 z-0 transition-opacity duration-500 ${
+            effectiveStatus === 'eliminated'
+              ? 'bg-[radial-gradient(ellipse_120%_70%_at_50%_0%,rgba(139,92,246,0.36),rgba(139,92,246,0.14)_48%,transparent_82%)]'
+              : 'bg-[radial-gradient(ellipse_120%_60%_at_50%_0%,rgba(139,92,246,0.28),rgba(139,92,246,0.1)_45%,transparent_78%)]'
+          }`}
+        />
+      )}
       {/* Non-Overlapping Mobile-First Flex Column Shell */}
-      <main className="max-w-md mx-auto h-dvh flex flex-col overflow-hidden relative">
+      <main className="w-full max-w-lg mx-auto h-dvh flex flex-col overflow-hidden relative z-10">
         {/* Reserved Top Strip with Supabase Realtime Heartbeat & Passcode-Gated Dev Controls */}
         <DevSwitcherBar
           isDebugMode={isDebugMode}
@@ -589,11 +775,20 @@ export default function App() {
             roomCode={roomCode}
             badgeNumber={badgeNumber}
             wsConnected={isConnectionHealthy}
-            onNameChange={setName}
-            onRoomCodeChange={setRoomCode}
+            supabaseConfigStatus={supabaseConfigStatus}
+            joinError={joinError}
+            onNameChange={(val) => {
+              setJoinError(null);
+              setName(val);
+            }}
+            onRoomCodeChange={(val) => {
+              setJoinError(null);
+              setRoomCode(val);
+            }}
             onOpenScanner={() => setScannerMode('wristband')}
-            onJoinLobby={() => void handleJoinLobby()}
-            onOpenPrintKit={() => navigateScreen('print')}
+            onJoinLobby={() => void handleJoinLobby(false)}
+            onJoinLocalFallback={() => void handleJoinLobby(true)}
+            onOpenPrintKit={handleOpenPrintKitRequest}
           />
         )}
 
@@ -607,31 +802,42 @@ export default function App() {
             onSetImpostorCount={(count) => void setImpostorCount(count)}
             onStartMatch={() => void handleStartMatch()}
             onSeedDemoPlayers={() => void seedDemoPlayers()}
+            onLeaveLobby={() => {
+              playUiClick();
+              setJoinError(null);
+              setScreenOverride(null);
+              leaveRoom();
+            }}
           />
         )}
 
         {activeScreen === 'gameplay' && (
           <GameplayScreen
-            myPlayer={myPlayer}
+            myPlayer={displayMyPlayer}
+            players={uiPlayers}
             effectiveRole={effectiveRole}
             effectiveStatus={effectiveStatus}
             taskProgress={room?.task_progress ?? 0}
             sabotage={uiSabotage}
             isCommsSabotaged={isCommsSabotaged}
+            commsLabel={sabotageTargets.commsLabel}
             assignedStationIds={assignedStationIds}
             killCooldownEnd={killCooldownEnd}
             winner={uiWinner}
             winReason={uiWinReason}
-            onScanStation={() => {
+            onScanStation={(preselectedStationId) => {
               playUiClick();
+              setTargetStationId(preselectedStationId || null);
               setScannerMode('station');
             }}
             onReportBody={() => {
               playUiClick();
+              setTargetStationId(null);
               setScannerMode('report');
             }}
             onEliminateScan={() => {
               playUiClick();
+              setTargetStationId(null);
               setScannerMode('eliminate');
             }}
             onTriggerSabotage={(type = 'REACTOR') => {
@@ -654,6 +860,7 @@ export default function App() {
             }}
             onResetMatch={() => {
               playUiClick();
+              setFakeCompletedIds([]);
               setScreenOverride(null);
               setRoleOverride(null);
               setStatusOverride(null);
@@ -695,10 +902,21 @@ export default function App() {
           players={uiPlayers}
           myPlayerId={identity?.badgeId}
           assignedStationIds={assignedStationIds}
+          completedStationIds={
+            effectiveRole === 'impostor'
+              ? fakeCompletedIds
+              : privateRole?.completed_stations || []
+          }
+          targetStationId={targetStationId}
+          isFakeScanMode={effectiveRole === 'impostor'}
           activeSabotageStationId={activeSabotageStationId}
+          activeSabotageStationIds={activeSabotageStationIds}
           onScanBadge={(badge) => void handleScanBadgeResult(badge)}
           onScanStation={(stationId) => void handleScanStationResult(stationId)}
-          onClose={() => setScannerMode(null)}
+          onClose={() => {
+            setScannerMode(null);
+            setTargetStationId(null);
+          }}
         />
       )}
 
@@ -720,7 +938,16 @@ export default function App() {
         />
       )}
 
-      {/* Developer Insights Drawer */}
+      {/* Host Printable QR Kit Passcode Modal (Per-Lobby Passcode) */}
+      {showPrintPasscodeModal && (
+        <PrintKitPasscodeModal
+          initialRoomCode={identity?.roomCode || roomCode}
+          onSuccess={handlePrintPasscodeSuccess}
+          onClose={() => setShowPrintPasscodeModal(false)}
+        />
+      )}
+
+      {/* Developer Insights & Laptop Studio Drawer */}
       {showInsightsModal && isDebugMode && (
         <DeveloperInsightsModal
           isSupabaseConfigured={isSupabaseConfigured}
@@ -734,6 +961,27 @@ export default function App() {
           privateRole={privateRole}
           votes={votes}
           events={insightEvents}
+          recentLobbies={recentLobbies}
+          activeRoomCodeDraft={roomCode}
+          onCreateLobby={async (code, impostors) => {
+            const created = await createLobby(code, impostors);
+            setRoomCode(created);
+          }}
+          onSwitchLobby={async (code) => {
+            await switchLobby(code);
+            setRoomCode(code);
+          }}
+          onAddCandidate={addCandidate}
+          onRemoveCandidate={removeCandidate}
+          onToggleCandidateAlive={toggleCandidateAlive}
+          onSeedDemoPlayers={seedDemoPlayers}
+          onSetImpostorCount={setImpostorCount}
+          onStartMatch={startMatch}
+          onResetMatch={resetRoom}
+          onSelectPreset={(preset) => void handleSelectDevPreset(preset)}
+          onTestStationMiniGame={(station) =>
+            setActiveMiniGameStation(toTaskStation(station))
+          }
           onClearEvents={clearInsightEvents}
           onLockDevMode={handleLockDevMode}
           onClose={() => setShowInsightsModal(false)}

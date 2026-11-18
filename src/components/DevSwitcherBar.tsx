@@ -186,7 +186,8 @@ export function DevSwitcherBar({
               className="h-7 px-2.5 rounded-full bg-cyan-500/15 backdrop-blur-xl border border-cyan-400/40 shadow-lg text-[10px] font-bold tracking-wide text-cyan-200 flex items-center gap-1 hover:bg-cyan-500/25 transition-all active:scale-95"
             >
               <BarChart3 className="w-3 h-3 text-cyan-300" />
-              <span>INSIGHTS</span>
+              <span className="hidden sm:inline">DEV STUDIO</span>
+              <span className="sm:hidden">INSIGHTS</span>
             </button>
           )}
 
