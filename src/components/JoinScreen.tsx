@@ -7,11 +7,13 @@ import {
   Ghost,
   Lock,
   Megaphone,
+  Monitor,
   Printer,
   QrCode,
   Radio,
   ShieldAlert,
   ShieldCheck,
+  Trophy,
   Volume2,
   VolumeX,
   X,
@@ -29,7 +31,7 @@ import {
   subscribeAmbienceState,
   toggleAmbienceMuted,
 } from '../utils/feedback';
-import missionEmblemImg from '../assets/images/campus_mission_emblem_1795073098326.jpg';
+const APP_LOGO_SRC = '/assets/aistudio/image_612f43df.png';
 
 interface JoinScreenProps {
   name: string;
@@ -45,6 +47,8 @@ interface JoinScreenProps {
   onJoinLobby: () => void;
   onJoinLocalFallback?: () => void;
   onOpenPrintKit: () => void;
+  onOpenLeaderboard: () => void;
+  onOpenSpectator?: () => void;
 }
 
 export function JoinScreen({
@@ -61,6 +65,8 @@ export function JoinScreen({
   onJoinLobby,
   onJoinLocalFallback,
   onOpenPrintKit,
+  onOpenLeaderboard,
+  onOpenSpectator,
 }: JoinScreenProps) {
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showIosGuide, setShowIosGuide] = useState(false);
@@ -98,17 +104,29 @@ export function JoinScreen({
     >
       {/* Top Utility Row + Bespoke Emblem Hero */}
       <div className="shrink-0 space-y-2">
-        <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center justify-between gap-1.5">
           <button
             type="button"
             onClick={() => {
               playUiClick();
               setShowFieldGuide(true);
             }}
-            className="min-h-[38px] px-3 rounded-xl bg-slate-900/75 hover:bg-slate-800/85 border border-white/12 hover:border-cyan-400/40 text-[11px] font-semibold text-slate-200 hover:text-cyan-200 inline-flex items-center gap-1.5 transition-all active:scale-95 whitespace-nowrap"
+            className="min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-slate-900/75 hover:bg-slate-800/85 border border-white/12 hover:border-cyan-400/40 text-[11px] font-semibold text-slate-200 hover:text-cyan-200 inline-flex items-center gap-1.5 transition-all active:scale-95 whitespace-nowrap"
           >
             <BookOpen className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
             <span>Field Guide</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              playUiClick();
+              onOpenLeaderboard();
+            }}
+            className="min-h-[38px] px-2.5 sm:px-3 rounded-xl bg-amber-500/14 hover:bg-amber-500/22 border border-amber-400/45 text-[11px] font-extrabold uppercase tracking-wide text-amber-200 inline-flex items-center gap-1.5 transition-all active:scale-95 whitespace-nowrap shadow-[0_0_16px_rgba(245,158,11,0.16)]"
+          >
+            <Trophy className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+            <span>Leaderboard</span>
           </button>
 
           <button
@@ -151,9 +169,8 @@ export function JoinScreen({
             <div className="relative w-14 h-14 rounded-2xl overflow-hidden bg-gradient-to-br from-cyan-500/20 to-emerald-500/15 border border-cyan-300/50 shadow-[0_0_28px_rgba(6,182,212,0.34)] flex items-center justify-center">
               {!emblemFailed ? (
                 <img
-                  src={missionEmblemImg}
+                  src={APP_LOGO_SRC}
                   alt="Campus Among Us Mission Crest"
-                  referrerPolicy="no-referrer"
                   onError={() => setEmblemFailed(true)}
                   className="w-full h-full object-cover"
                 />
@@ -374,19 +391,33 @@ export function JoinScreen({
           )}
         </button>
 
-        <div className="flex items-center justify-center gap-2 sm:gap-3 flex-wrap">
+        <div className="flex items-center justify-center gap-2 sm:gap-2.5 flex-wrap">
           <button
             type="button"
             onClick={() => {
               playUiClick();
               onOpenPrintKit();
             }}
-            className="min-h-[44px] inline-flex items-center gap-1.5 text-xs font-semibold text-slate-200 hover:text-cyan-300 px-3.5 py-2 rounded-xl bg-slate-900/55 hover:bg-slate-900/85 border border-white/10 hover:border-cyan-400/40 transition-all whitespace-nowrap active:scale-95"
+            className="min-h-[42px] inline-flex items-center gap-1.5 text-xs font-semibold text-slate-200 hover:text-cyan-300 px-3 py-2 rounded-xl bg-slate-900/55 hover:bg-slate-900/85 border border-white/10 hover:border-cyan-400/40 transition-all whitespace-nowrap active:scale-95"
           >
             <Printer className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
             <span>Host Printable QR Kit</span>
             <Lock className="w-3 h-3 text-amber-300 shrink-0" />
           </button>
+
+          {onOpenSpectator && (
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                onOpenSpectator();
+              }}
+              className="min-h-[42px] inline-flex items-center gap-1.5 text-xs font-semibold text-slate-200 hover:text-emerald-300 px-3 py-2 rounded-xl bg-slate-900/55 hover:bg-slate-900/85 border border-white/10 hover:border-emerald-400/40 transition-all whitespace-nowrap active:scale-95"
+            >
+              <Monitor className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+              <span>Projector HQ</span>
+            </button>
+          )}
 
           {!isInstalled && (isInstallable || isIOS) && (
             <button

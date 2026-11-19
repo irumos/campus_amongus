@@ -1,7 +1,6 @@
 export {
   isAmbienceMuted,
   isAmbiencePlaying,
-  playCommsJamSound,
   playCountdownTick,
   playEjectionSound,
   playEmergencySiren as playAlarmSound,
@@ -10,7 +9,6 @@ export {
   playIdCardScanSound,
   playPhantomChime,
   playQrScanSuccess,
-  playSabotageAlarm,
   playSkipVoteRevealSound,
   playTaskSuccessFeedback as playSuccessSound,
   playTieVoteRevealSound,

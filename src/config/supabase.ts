@@ -47,6 +47,22 @@ export interface VoteRow {
   target_badge_id: string;
 }
 
+export interface TournamentEntryRow {
+  player_key: string;
+  player_name: string;
+  badge_id: string;
+  color: string;
+  total_points: number;
+  matches_played: number;
+  total_wins: number;
+  crewmate_wins: number;
+  impostor_wins: number;
+  tasks_completed: number;
+  eliminations: number;
+  last_room_code: string | null;
+  updated_at: string;
+}
+
 export type SupabaseConfigStatus =
   | 'configured'
   | 'missing'
@@ -513,6 +529,246 @@ BEGIN
     ALTER PUBLICATION supabase_realtime ADD TABLE public.votes;
   END IF;
 END $$;
+
+-- Multi-Round Campus Tournament Leaderboard + Idempotent Scoring RPC
+CREATE TABLE IF NOT EXISTS public.tournament_leaderboard (
+  player_key TEXT PRIMARY KEY,
+  player_name TEXT NOT NULL,
+  badge_id TEXT NOT NULL DEFAULT 'P01',
+  color TEXT NOT NULL DEFAULT '#06b6d4',
+  total_points INTEGER NOT NULL DEFAULT 0,
+  matches_played INTEGER NOT NULL DEFAULT 0,
+  total_wins INTEGER NOT NULL DEFAULT 0,
+  crewmate_wins INTEGER NOT NULL DEFAULT 0,
+  impostor_wins INTEGER NOT NULL DEFAULT 0,
+  tasks_completed INTEGER NOT NULL DEFAULT 0,
+  eliminations INTEGER NOT NULL DEFAULT 0,
+  last_room_code TEXT,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS public.tournament_scored_matches (
+  match_id TEXT PRIMARY KEY,
+  room_code TEXT NOT NULL,
+  winner TEXT NOT NULL,
+  scored_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE public.tournament_leaderboard REPLICA IDENTITY FULL;
+ALTER TABLE public.tournament_leaderboard ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.tournament_scored_matches ENABLE ROW LEVEL SECURITY;
+
+DROP POLICY IF EXISTS "campus_leaderboard_all" ON public.tournament_leaderboard;
+CREATE POLICY "campus_leaderboard_all" ON public.tournament_leaderboard FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "campus_scored_matches_all" ON public.tournament_scored_matches;
+CREATE POLICY "campus_scored_matches_all" ON public.tournament_scored_matches FOR ALL TO anon, authenticated USING (true) WITH CHECK (true);
+
+DO $$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_publication_tables WHERE pubname = 'supabase_realtime' AND tablename = 'tournament_leaderboard') THEN
+    ALTER PUBLICATION supabase_realtime ADD TABLE public.tournament_leaderboard;
+  END IF;
+END $$;
+
+CREATE OR REPLACE FUNCTION public.award_tournament_points(
+  p_match_id TEXT,
+  p_room_code TEXT,
+  p_winner TEXT,
+  p_entries JSONB
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_inserted_match TEXT;
+  v_item JSONB;
+  v_key TEXT;
+  v_name TEXT;
+  v_badge TEXT;
+  v_color TEXT;
+  v_role TEXT;
+  v_points INTEGER;
+  v_tasks INTEGER;
+  v_elims INTEGER;
+  v_won BOOLEAN;
+  v_count INTEGER := 0;
+BEGIN
+  INSERT INTO public.tournament_scored_matches (match_id, room_code, winner)
+  VALUES (p_match_id, p_room_code, p_winner)
+  ON CONFLICT (match_id) DO NOTHING
+  RETURNING match_id INTO v_inserted_match;
+
+  IF v_inserted_match IS NULL THEN
+    RETURN jsonb_build_object('ok', true, 'already_scored', true, 'updated_count', 0);
+  END IF;
+
+  FOR v_item IN SELECT * FROM jsonb_array_elements(COALESCE(p_entries, '[]'::jsonb))
+  LOOP
+    v_key := LOWER(TRIM(COALESCE(v_item->>'player_key', '')));
+    v_name := TRIM(COALESCE(v_item->>'player_name', 'Operative'));
+    v_badge := COALESCE(v_item->>'badge_id', 'P01');
+    v_color := COALESCE(v_item->>'color', '#06b6d4');
+    v_role := UPPER(COALESCE(v_item->>'role', 'CREWMATE'));
+    v_points := GREATEST(0, COALESCE((v_item->>'points_earned')::INTEGER, 0));
+    v_tasks := GREATEST(0, COALESCE((v_item->>'tasks_completed')::INTEGER, 0));
+    v_elims := GREATEST(0, COALESCE((v_item->>'eliminations')::INTEGER, 0));
+    v_won := COALESCE((v_item->>'won')::BOOLEAN, false);
+
+    IF v_key = '' THEN
+      v_key := LOWER(v_badge);
+    END IF;
+
+    INSERT INTO public.tournament_leaderboard (
+      player_key,
+      player_name,
+      badge_id,
+      color,
+      total_points,
+      matches_played,
+      total_wins,
+      crewmate_wins,
+      impostor_wins,
+      tasks_completed,
+      eliminations,
+      last_room_code,
+      updated_at
+    )
+    VALUES (
+      v_key,
+      v_name,
+      v_badge,
+      v_color,
+      v_points,
+      1,
+      CASE WHEN v_won THEN 1 ELSE 0 END,
+      CASE WHEN v_won AND v_role = 'CREWMATE' THEN 1 ELSE 0 END,
+      CASE WHEN v_won AND v_role = 'IMPOSTOR' THEN 1 ELSE 0 END,
+      v_tasks,
+      v_elims,
+      p_room_code,
+      NOW()
+    )
+    ON CONFLICT (player_key) DO UPDATE SET
+      player_name = EXCLUDED.player_name,
+      badge_id = EXCLUDED.badge_id,
+      color = EXCLUDED.color,
+      total_points = public.tournament_leaderboard.total_points + EXCLUDED.total_points,
+      matches_played = public.tournament_leaderboard.matches_played + 1,
+      total_wins = public.tournament_leaderboard.total_wins + EXCLUDED.total_wins,
+      crewmate_wins = public.tournament_leaderboard.crewmate_wins + EXCLUDED.crewmate_wins,
+      impostor_wins = public.tournament_leaderboard.impostor_wins + EXCLUDED.impostor_wins,
+      tasks_completed = public.tournament_leaderboard.tasks_completed + EXCLUDED.tasks_completed,
+      eliminations = public.tournament_leaderboard.eliminations + EXCLUDED.eliminations,
+      last_room_code = EXCLUDED.last_room_code,
+      updated_at = NOW();
+
+    v_count := v_count + 1;
+  END LOOP;
+
+  RETURN jsonb_build_object('ok', true, 'already_scored', false, 'updated_count', v_count);
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.reset_tournament_leaderboard()
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+BEGIN
+  DELETE FROM public.tournament_leaderboard WHERE true;
+  DELETE FROM public.tournament_scored_matches WHERE true;
+  RETURN jsonb_build_object('ok', true);
+END;
+$$;
+
+-- Host-verified (or Developer override) 1-Tap Rematch RPC:
+-- Resets room & players back to LOBBY while preserving every player's badge_id, name, host_badge_id, and wristband_secret
+CREATE OR REPLACE FUNCTION public.reset_room_for_rematch(
+  p_room_code TEXT,
+  p_caller_badge_id TEXT DEFAULT NULL,
+  p_wristband_secret TEXT DEFAULT NULL,
+  p_is_dev_override BOOLEAN DEFAULT FALSE
+)
+RETURNS JSONB
+LANGUAGE plpgsql
+SECURITY DEFINER
+AS $$
+DECLARE
+  v_room_code TEXT;
+  v_host_badge TEXT;
+  v_caller_badge TEXT;
+  v_stored_secret TEXT;
+BEGIN
+  v_room_code := UPPER(TRIM(COALESCE(p_room_code, '')));
+  IF v_room_code = '' THEN
+    RETURN jsonb_build_object('ok', false, 'reason', 'Missing room code.');
+  END IF;
+
+  SELECT host_badge_id
+  INTO v_host_badge
+  FROM public.rooms
+  WHERE room_code = v_room_code;
+
+  IF NOT FOUND THEN
+    RETURN jsonb_build_object('ok', false, 'reason', 'Room not found.');
+  END IF;
+
+  IF NOT COALESCE(p_is_dev_override, false) THEN
+    v_caller_badge := UPPER(TRIM(COALESCE(p_caller_badge_id, '')));
+    IF v_host_badge IS NULL OR v_caller_badge = '' OR UPPER(TRIM(v_host_badge)) <> v_caller_badge THEN
+      RETURN jsonb_build_object('ok', false, 'reason', 'Only the designated Room Host can launch a rematch.');
+    END IF;
+
+    SELECT wristband_secret
+    INTO v_stored_secret
+    FROM public.private_roles
+    WHERE room_code = v_room_code
+      AND UPPER(TRIM(badge_id)) = v_caller_badge
+    LIMIT 1;
+
+    IF v_stored_secret IS NOT NULL AND v_stored_secret <> '' AND COALESCE(p_wristband_secret, '') <> v_stored_secret THEN
+      RETURN jsonb_build_object('ok', false, 'reason', 'Host wristband_secret verification failed.');
+    END IF;
+  END IF;
+
+  DELETE FROM public.votes
+  WHERE room_code = v_room_code;
+
+  UPDATE public.public_players
+  SET is_alive = true,
+      has_voted = false
+  WHERE room_code = v_room_code;
+
+  -- Preserve wristband_secret so players stay authenticated without rescanning
+  UPDATE public.private_roles
+  SET role = 'CREWMATE',
+      assigned_tasks = '[]'::jsonb,
+      completed_tasks = '[]'::jsonb,
+      fellow_impostors = '[]'::jsonb,
+      kill_cooldown_ends_at = NULL
+  WHERE room_code = v_room_code;
+
+  UPDATE public.rooms
+  SET status = 'LOBBY',
+      winner = NULL,
+      task_progress = 0,
+      active_sabotage = NULL,
+      sabotage_ends_at = NULL,
+      meeting_ends_at = NULL,
+      ejection_result = NULL,
+      meeting_caller_badge_id = NULL,
+      meeting_body_badge_id = NULL
+  WHERE room_code = v_room_code;
+
+  RETURN jsonb_build_object('ok', true, 'room_code', v_room_code);
+END;
+$$;
+
+GRANT EXECUTE ON FUNCTION public.award_tournament_points(TEXT, TEXT, TEXT, JSONB) TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reset_tournament_leaderboard() TO anon, authenticated;
+GRANT EXECUTE ON FUNCTION public.reset_room_for_rematch(TEXT, TEXT, TEXT, BOOLEAN) TO anon, authenticated;
 
 -- Refresh PostgREST schema cache immediately
 NOTIFY pgrst, 'reload schema';`;

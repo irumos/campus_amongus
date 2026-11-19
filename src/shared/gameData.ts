@@ -7,7 +7,13 @@ import {
 } from '../config/campusConfig.ts';
 import { getActiveStations } from '../config/stationStore.ts';
 
-export type ScreenId = 'join' | 'lobby' | 'gameplay' | 'meeting' | 'print';
+export type ScreenId =
+  | 'join'
+  | 'lobby'
+  | 'gameplay'
+  | 'meeting'
+  | 'print'
+  | 'spectator';
 
 export type PlayerRole = 'crewmate' | 'impostor';
 

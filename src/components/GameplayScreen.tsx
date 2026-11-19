@@ -14,10 +14,11 @@ import {
   LogOut,
   MapPin,
   Megaphone,
+  Pin,
   Radio,
-  RotateCcw,
   ShieldAlert,
   Skull,
+  Star,
   Trophy,
   Users,
   Zap,
@@ -32,13 +33,14 @@ import {
 } from '../shared/gameData';
 import type { ImpostorOpsLogEntry } from '../hooks/useCampusGame';
 import { useCampusStations } from '../config/stationStore';
+import { TOURNAMENT_SCORING_RULES } from '../config/tournamentStore';
 import {
-  playCountdownTick,
   playPhantomChime,
   playUiClick,
   playVictoryFanfare,
 } from '../utils/feedback';
 import { vibratePattern } from '../utils/sound';
+import { CampusMinimap } from './CampusMinimap';
 
 interface GameplayScreenProps {
   myPlayer: Player | null;
@@ -62,6 +64,8 @@ interface GameplayScreenProps {
   onExitPov?: () => void;
   winner: 'crewmates' | 'impostors' | null;
   winReason: string | null;
+  hostBadgeId?: string | null;
+  isHost?: boolean;
   onScanStation: (preselectedStationId?: string) => void;
   onReportBody: () => void;
   onEliminateScan: () => void;
@@ -70,8 +74,9 @@ interface GameplayScreenProps {
   onDefuseSabotage: () => void;
   onCallMeeting: () => void;
   onEnterGhostMode: () => void;
-  onResetMatch: () => void;
+  onResetMatch: () => void | Promise<void>;
   onExitMatch?: () => void;
+  onOpenLeaderboard?: () => void;
 }
 
 const LONG_PRESS_OPS_MS = 450;
@@ -124,6 +129,8 @@ export function GameplayScreen({
   onExitPov,
   winner,
   winReason,
+  hostBadgeId = null,
+  isHost: isHostProp,
   onScanStation,
   onReportBody,
   onEliminateScan,
@@ -134,17 +141,69 @@ export function GameplayScreen({
   onEnterGhostMode,
   onResetMatch,
   onExitMatch,
+  onOpenLeaderboard,
 }: GameplayScreenProps) {
   const [roleRevealed, setRoleRevealed] = useState(false);
   const [covertOpsOpen, setCovertOpsOpen] = useState(false);
   const [covertTab, setCovertTab] = useState<'ops' | 'log'>('ops');
   const [logFilter, setLogFilter] = useState<'all' | 'kills' | 'sabotages'>('all');
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
+  const [rematchBusy, setRematchBusy] = useState(false);
   const [holdChargePct, setHoldChargePct] = useState(0);
   const [now, setNow] = useState(Date.now());
   const [progressDelta, setProgressDelta] = useState<number | null>(null);
   const [progressPulse, setProgressPulse] = useState(false);
+  const [manualCurrentStationId, setManualCurrentStationId] = useState<
+    string | null
+  >(null);
+  const pinStorageKey = `cairl_pinned_station_v1_${myPlayer?.id || 'local'}`;
+  const [pinnedStationId, setPinnedStationId] = useState<string | null>(() => {
+    try {
+      return typeof window !== 'undefined'
+        ? localStorage.getItem(`cairl_pinned_station_v1_${myPlayer?.id || 'local'}`)
+        : null;
+    } catch {
+      return null;
+    }
+  });
   const activeStations = useCampusStations().map(toTaskStation);
+
+  // Keep personal pinned station synced if player identity / Dev POV switches
+  useEffect(() => {
+    try {
+      const saved = localStorage.getItem(pinStorageKey);
+      setPinnedStationId(saved || null);
+    } catch {
+      setPinnedStationId(null);
+    }
+  }, [pinStorageKey]);
+
+  const handleTogglePinStation = useCallback(
+    (stationId: string) => {
+      setPinnedStationId((prev) => {
+        const next = prev === stationId ? null : stationId;
+        try {
+          if (next) {
+            localStorage.setItem(pinStorageKey, next);
+          } else {
+            localStorage.removeItem(pinStorageKey);
+          }
+        } catch {
+          // ignore storage errors
+        }
+        return next;
+      });
+    },
+    [pinStorageKey]
+  );
+
+  // Validated pinned station ID (ignores stale IDs if stations were edited/deleted)
+  const effectivePinnedStationId = useMemo(() => {
+    if (!pinnedStationId) return null;
+    return activeStations.some((s) => s.id === pinnedStationId)
+      ? pinnedStationId
+      : null;
+  }, [pinnedStationId, activeStations]);
 
   const clampedTaskProgress = Math.max(
     0,
@@ -157,7 +216,6 @@ export function GameplayScreen({
   const lastTapRef = useRef<number>(0);
   const covertOpenedAtRef = useRef<number>(0);
   const prevWinnerRef = useRef<'crewmates' | 'impostors' | null>(null);
-  const lastTickSecRef = useRef<number>(-1);
   const prevTaskProgressRef = useRef<number>(clampedTaskProgress);
   const progressPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -329,27 +387,58 @@ export function GameplayScreen({
     prevWinnerRef.current = winner;
   }, [winner]);
 
-  // Subtle countdown tick during final 10 seconds of Reactor Meltdown
-  useEffect(() => {
-    if (
-      sabotage?.type === 'reactor' &&
-      sabotageSecondsLeft > 0 &&
-      sabotageSecondsLeft <= 10 &&
-      lastTickSecRef.current !== sabotageSecondsLeft
-    ) {
-      lastTickSecRef.current = sabotageSecondsLeft;
-      playCountdownTick(sabotageSecondsLeft <= 5);
-    } else if (!sabotage || sabotageSecondsLeft > 10) {
-      lastTickSecRef.current = -1;
-    }
-  }, [sabotage, sabotageSecondsLeft]);
-
   const killCooldownSeconds = Math.max(
     0,
     Math.ceil((killCooldownEnd - now) / 1000)
   );
   const cooldownRatio = Math.min(1, killCooldownSeconds / 30);
   const completedIds = myPlayer?.completedTaskIds || [];
+
+  // Resolve the player's current task station for relative minimap sabotage navigation
+  const resolvedCurrentStationId = useMemo(() => {
+    if (
+      manualCurrentStationId &&
+      activeStations.some((s) => s.id === manualCurrentStationId)
+    ) {
+      return manualCurrentStationId;
+    }
+    const assignedPool =
+      assignedStationIds && assignedStationIds.length > 0
+        ? activeStations.filter((s) => assignedStationIds.includes(s.id))
+        : activeStations;
+    const nextIncomplete = assignedPool.find(
+      (s) => !completedIds.includes(s.id)
+    );
+    if (nextIncomplete) return nextIncomplete.id;
+    const lastCompleted = completedIds[completedIds.length - 1];
+    if (lastCompleted && activeStations.some((s) => s.id === lastCompleted)) {
+      return lastCompleted;
+    }
+    return assignedPool[0]?.id || activeStations[0]?.id || null;
+  }, [
+    manualCurrentStationId,
+    activeStations,
+    assignedStationIds,
+    completedIds,
+  ]);
+
+  const activeSabotageIdsForMap = useMemo(() => {
+    if (!sabotage) return [];
+    if (sabotageStationIds && sabotageStationIds.length > 0) {
+      return sabotageStationIds;
+    }
+    return sabotage.targetStationId ? [sabotage.targetStationId] : [];
+  }, [sabotage, sabotageStationIds]);
+
+  const handleScanStationWithTracking = useCallback(
+    (stationId?: string) => {
+      if (stationId) {
+        setManualCurrentStationId(stationId);
+      }
+      onScanStation(stationId);
+    },
+    [onScanStation]
+  );
 
   const fellowImpostors = useMemo(
     () =>
@@ -861,6 +950,25 @@ export function GameplayScreen({
           )}
         </button>
 
+        {/* Tactical Campus Minimap (auto-expands on active sabotage with relative route guidance) */}
+        <CampusMinimap
+          stations={activeStations}
+          assignedStationIds={
+            assignedStationIds && assignedStationIds.length > 0
+              ? assignedStationIds
+              : activeStations.map((s) => s.id)
+          }
+          completedStationIds={completedIds}
+          currentStationId={resolvedCurrentStationId}
+          pinnedStationId={effectivePinnedStationId}
+          sabotage={sabotage}
+          sabotageStationIds={activeSabotageIdsForMap}
+          isCommsSabotaged={isCommsSabotaged}
+          onSelectCurrentStation={(id) => setManualCurrentStationId(id)}
+          onTogglePinStation={handleTogglePinStation}
+          onScanStation={handleScanStationWithTracking}
+        />
+
         {/* CAMPUS OBJECTIVES: Assigned Stations Grid (Identical for Crewmate & Impostor) */}
         <div className="space-y-1.5 min-h-0 flex-1 flex flex-col">
           {(() => {
@@ -1021,13 +1129,38 @@ export function GameplayScreen({
               (c) => c.isDone
             ).length;
 
+            const pinnedStationObj = effectivePinnedStationId
+              ? activeStations.find((s) => s.id === effectivePinnedStationId) ||
+                null
+              : null;
+
             return (
               <>
-                <div className="flex items-center justify-between px-0.5 shrink-0">
-                  <h2 className="font-display text-[11px] font-extrabold tracking-widest uppercase text-slate-400">
-                    Campus Objectives
-                  </h2>
-                  <span className="text-[11px] font-mono text-slate-400 tabular-nums">
+                <div className="flex items-center justify-between gap-2 px-0.5 shrink-0">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h2 className="font-display text-[11px] font-extrabold tracking-widest uppercase text-slate-400 shrink-0">
+                      Campus Objectives
+                    </h2>
+                    {pinnedStationObj && (
+                      <span className="inline-flex items-center gap-1 text-[10px] font-mono text-yellow-300 truncate">
+                        <Star className="w-3 h-3 fill-yellow-300 shrink-0" />
+                        <span className="truncate">
+                          {pinnedStationObj.shortLabel}
+                        </span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playUiClick();
+                            handleTogglePinStation(pinnedStationObj.id);
+                          }}
+                          className="text-slate-400 hover:text-white underline ml-0.5 shrink-0"
+                        >
+                          Clear
+                        </button>
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-[11px] font-mono text-slate-400 tabular-nums shrink-0">
                     {completedObjectivesCount}/{assignedCards.length} Done
                   </span>
                 </div>
@@ -1043,22 +1176,35 @@ export function GameplayScreen({
                       );
                       const isReactorTarget =
                         isSabotageTarget && sabotage?.type === 'reactor';
+                      const targetStationIdForCard =
+                        obj.sabotageMatchId || obj.scanStationId;
+                      const isPinnedTarget =
+                        effectivePinnedStationId === targetStationIdForCard;
                       const barColor = obj.isDone
                         ? 'bg-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.7)]'
+                        : isPinnedTarget
+                        ? 'bg-yellow-400 shadow-[0_0_10px_rgba(250,204,21,0.75)]'
                         : obj.isLongRelay
                         ? 'bg-amber-400 shadow-[0_0_10px_rgba(245,158,11,0.65)]'
                         : stationAccentByIndex[idx % stationAccentByIndex.length];
 
                       return (
-                        <button
+                        <div
                           key={obj.key}
-                          type="button"
+                          role="button"
+                          tabIndex={0}
                           onClick={() =>
-                            onScanStation(
-                              obj.sabotageMatchId || obj.scanStationId
-                            )
+                            handleScanStationWithTracking(targetStationIdForCard)
                           }
-                          className={`relative overflow-hidden glass-card rounded-2xl p-2.5 sm:p-3.5 flex flex-col justify-between gap-1.5 text-left transition-all active:scale-95 ${
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              handleScanStationWithTracking(
+                                targetStationIdForCard
+                              );
+                            }
+                          }}
+                          className={`relative overflow-hidden glass-card rounded-2xl p-2.5 sm:p-3.5 flex flex-col justify-between gap-1.5 text-left transition-all active:scale-95 cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 ${
                             isLastOdd || obj.isLongRelay
                               ? 'col-span-2 min-h-[clamp(60px,8.5dvh,78px)]'
                               : 'min-h-[clamp(68px,10dvh,88px)]'
@@ -1067,6 +1213,8 @@ export function GameplayScreen({
                               ? 'border-2 border-rose-400/80 bg-rose-950/40 hover:border-rose-300 ring-1 ring-rose-500/40 animate-sabotage-glow-reactor'
                               : isSabotageTarget
                               ? 'border-2 border-amber-400/80 bg-amber-950/38 hover:border-amber-300 ring-1 ring-amber-400/40 animate-sabotage-glow-comms'
+                              : isPinnedTarget
+                              ? 'border-yellow-400/70 bg-yellow-950/20 shadow-[0_0_18px_rgba(250,204,21,0.16)]'
                               : obj.isDone
                               ? 'border-emerald-500/45 bg-emerald-950/30'
                               : obj.isLongRelay
@@ -1117,6 +1265,8 @@ export function GameplayScreen({
                                     ? 'text-rose-300'
                                     : isSabotageTarget
                                     ? 'text-amber-300'
+                                    : isPinnedTarget
+                                    ? 'text-yellow-300'
                                     : obj.isDone
                                     ? 'text-emerald-300'
                                     : obj.isLongRelay
@@ -1128,31 +1278,64 @@ export function GameplayScreen({
                                   ? 'SABOTAGE · DEFUSE HERE'
                                   : isSabotageTarget
                                   ? 'COMMS · RESTORE HERE'
+                                  : isPinnedTarget
+                                  ? `★ TARGET · ${obj.badgeLabel}`
                                   : obj.badgeLabel}
                               </span>
                             </div>
-                            {isSabotageTarget ? (
-                              <span
-                                className={`inline-flex items-center gap-1 text-[9px] font-mono font-extrabold uppercase shrink-0 ${
-                                  isReactorTarget
-                                    ? 'text-rose-300'
-                                    : 'text-amber-300'
+                            <div className="flex items-center gap-1 shrink-0">
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  playUiClick();
+                                  handleTogglePinStation(targetStationIdForCard);
+                                }}
+                                aria-label={
+                                  isPinnedTarget
+                                    ? `Unpin ${obj.locationLabel} from minimap`
+                                    : `Pin ${obj.locationLabel} as target on minimap`
+                                }
+                                title={
+                                  isPinnedTarget
+                                    ? 'Unpin Target from Minimap'
+                                    : 'Pin as Target on Minimap'
+                                }
+                                className={`min-h-[28px] min-w-[28px] rounded-lg flex items-center justify-center border transition-colors ${
+                                  isPinnedTarget
+                                    ? 'bg-yellow-400/20 border-yellow-400/60 text-yellow-300'
+                                    : 'bg-slate-900/70 border-white/10 text-slate-400 hover:text-yellow-200 hover:border-yellow-400/40'
                                 }`}
                               >
-                                {isReactorTarget ? (
-                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                {isPinnedTarget ? (
+                                  <Star className="w-3.5 h-3.5 fill-yellow-300" />
                                 ) : (
-                                  <Radio className="w-3.5 h-3.5 shrink-0" />
+                                  <Pin className="w-3.5 h-3.5" />
                                 )}
-                                <span>{isReactorTarget ? 'Defuse' : 'Fix'}</span>
-                              </span>
-                            ) : obj.isDone ? (
-                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                            ) : (
-                              <span className="text-[9px] font-mono font-bold text-slate-400 shrink-0">
-                                QR
-                              </span>
-                            )}
+                              </button>
+                              {isSabotageTarget ? (
+                                <span
+                                  className={`inline-flex items-center gap-1 text-[9px] font-mono font-extrabold uppercase shrink-0 ${
+                                    isReactorTarget
+                                      ? 'text-rose-300'
+                                      : 'text-amber-300'
+                                  }`}
+                                >
+                                  {isReactorTarget ? (
+                                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                  ) : (
+                                    <Radio className="w-3.5 h-3.5 shrink-0" />
+                                  )}
+                                  <span>{isReactorTarget ? 'Defuse' : 'Fix'}</span>
+                                </span>
+                              ) : obj.isDone ? (
+                                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                              ) : (
+                                <span className="text-[9px] font-mono font-bold text-slate-400 shrink-0">
+                                  QR
+                                </span>
+                              )}
+                            </div>
                           </div>
 
                           <div className="space-y-0.5">
@@ -1206,7 +1389,7 @@ export function GameplayScreen({
                               )
                             )}
                           </div>
-                        </button>
+                        </div>
                       );
                     })}
                   </div>
@@ -1816,39 +1999,224 @@ export function GameplayScreen({
         })()}
 
       {/* Match Victory Overlay */}
-      {winner && (
-        <div className="fixed inset-0 z-50 bg-[#060913]/92 backdrop-blur-xl flex items-center justify-center p-5">
-          <div className="w-full max-w-md glass-card rounded-3xl p-6 text-center space-y-5">
-            <div
-              className={`w-16 h-16 rounded-2xl mx-auto flex items-center justify-center ${
-                winner === 'crewmates'
-                  ? 'bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 shadow-[0_0_30px_rgba(6,182,212,0.45)]'
-                  : 'bg-rose-500/20 border border-rose-400/50 text-rose-300 shadow-[0_0_30px_rgba(244,63,94,0.45)]'
-              }`}
-            >
-              <Trophy className="w-9 h-9" />
-            </div>
-            <div>
-              <h2
-                className={`font-display text-3xl font-extrabold tracking-wider uppercase ${
-                  winner === 'crewmates' ? 'text-cyan-300' : 'text-rose-400'
+      {winner && (() => {
+        const normalizedHostId = hostBadgeId
+          ? hostBadgeId.trim().toUpperCase()
+          : null;
+        const normalizedMyId = myPlayer?.id
+          ? myPlayer.id.trim().toUpperCase()
+          : null;
+        const isCurrentUserHost =
+          typeof isHostProp === 'boolean'
+            ? isHostProp
+            : Boolean(
+                normalizedHostId &&
+                  normalizedMyId &&
+                  normalizedHostId === normalizedMyId
+              );
+        const hostPlayer = normalizedHostId
+          ? players.find(
+              (p) => p.id.trim().toUpperCase() === normalizedHostId
+            ) || null
+          : null;
+        const hostLabel = hostPlayer
+          ? `${hostPlayer.name} (#${hostPlayer.badgeNumber})`
+          : normalizedHostId
+          ? `Badge #${normalizedHostId.replace(/^P/i, '').padStart(2, '0')}`
+          : 'Room Host';
+
+        // Compute personal round tournament points breakdown
+        const isImpostorRole = effectiveRole === 'impostor';
+        const myTeamWon =
+          (winner === 'crewmates' && !isImpostorRole) ||
+          (winner === 'impostors' && isImpostorRole);
+        const isAliveAtEnd = effectiveStatus === 'alive';
+        const myTasksCount = isImpostorRole
+          ? 0
+          : myPlayer?.completedTaskIds.length || 0;
+        const myElimsCount = isImpostorRole
+          ? impostorOpsLog.filter((entry) => entry.kind === 'KILL').length
+          : 0;
+
+        const breakdownItems: { label: string; pts: number }[] = [];
+        if (isImpostorRole) {
+          if (myTeamWon) {
+            breakdownItems.push({
+              label: 'Impostor Team Victory',
+              pts: TOURNAMENT_SCORING_RULES.IMPOSTOR_WIN,
+            });
+          }
+          if (myElimsCount > 0) {
+            breakdownItems.push({
+              label: `Eliminations (${myElimsCount} × ${TOURNAMENT_SCORING_RULES.ELIMINATION})`,
+              pts: myElimsCount * TOURNAMENT_SCORING_RULES.ELIMINATION,
+            });
+          }
+        } else {
+          if (myTeamWon) {
+            breakdownItems.push({
+              label: 'Crewmate Team Victory',
+              pts: TOURNAMENT_SCORING_RULES.CREWMATE_WIN,
+            });
+            if (isAliveAtEnd) {
+              breakdownItems.push({
+                label: 'Survival Bonus',
+                pts: TOURNAMENT_SCORING_RULES.CREWMATE_SURVIVAL,
+              });
+            }
+          }
+          if (myTasksCount > 0) {
+            breakdownItems.push({
+              label: `Tasks Completed (${myTasksCount} × ${TOURNAMENT_SCORING_RULES.TASK_COMPLETED})`,
+              pts: myTasksCount * TOURNAMENT_SCORING_RULES.TASK_COMPLETED,
+            });
+          }
+        }
+        const totalRoundPts = breakdownItems.reduce(
+          (sum, item) => sum + item.pts,
+          0
+        );
+
+        const handleHostPlayAgain = () => {
+          if (rematchBusy) return;
+          playUiClick();
+          setRematchBusy(true);
+          void Promise.resolve(onResetMatch()).finally(() => {
+            setRematchBusy(false);
+          });
+        };
+
+        return (
+          <div className="fixed inset-0 z-50 bg-[#060913]/92 backdrop-blur-xl flex items-center justify-center p-4 sm:p-5 overflow-y-auto">
+            <div className="w-full max-w-md glass-card rounded-3xl p-5 sm:p-6 text-center space-y-4 my-auto border border-white/15">
+              {/* Winner Banner */}
+              <div
+                className={`w-16 h-16 rounded-2xl mx-auto flex items-center justify-center ${
+                  winner === 'crewmates'
+                    ? 'bg-cyan-500/20 border border-cyan-400/50 text-cyan-300 shadow-[0_0_30px_rgba(6,182,212,0.45)]'
+                    : 'bg-rose-500/20 border border-rose-400/50 text-rose-300 shadow-[0_0_30px_rgba(244,63,94,0.45)]'
                 }`}
               >
-                {winner === 'crewmates' ? 'Crewmates Win!' : 'Impostors Win!'}
-              </h2>
-              <p className="text-sm text-slate-300 mt-1.5">{winReason}</p>
+                <Trophy className="w-9 h-9" />
+              </div>
+              <div>
+                <h2
+                  className={`font-display text-3xl font-extrabold tracking-wider uppercase ${
+                    winner === 'crewmates' ? 'text-cyan-300' : 'text-rose-400'
+                  }`}
+                >
+                  {winner === 'crewmates' ? 'Crewmates Win!' : 'Impostors Win!'}
+                </h2>
+                <p className="text-sm text-slate-300 mt-1">{winReason}</p>
+              </div>
+
+              {/* Round Tournament Points Breakdown */}
+              <div className="rounded-2xl bg-slate-950/80 border border-white/10 p-3.5 text-left space-y-2">
+                <div className="flex items-center justify-between gap-2 pb-1.5 border-b border-white/10">
+                  <span className="text-[10px] font-mono font-bold uppercase tracking-widest text-slate-400">
+                    Your Round Points
+                  </span>
+                  <span className="font-mono text-sm font-extrabold text-amber-300 tabular-nums">
+                    +{totalRoundPts} PTS
+                  </span>
+                </div>
+                {breakdownItems.length === 0 ? (
+                  <div className="text-xs text-slate-400 flex items-center justify-between">
+                    <span>No points earned this round</span>
+                    <span className="font-mono tabular-nums text-slate-500">+0</span>
+                  </div>
+                ) : (
+                  <div className="space-y-1.5">
+                    {breakdownItems.map((item) => (
+                      <div
+                        key={item.label}
+                        className="flex items-center justify-between gap-2 text-xs"
+                      >
+                        <span className="text-slate-300">{item.label}</span>
+                        <span className="font-mono font-bold text-emerald-300 tabular-nums shrink-0">
+                          +{item.pts}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              {/* Host vs Non-Host Rematch Controls */}
+              <div className="space-y-2.5 pt-1">
+                {isCurrentUserHost ? (
+                  <button
+                    type="button"
+                    disabled={rematchBusy}
+                    onClick={handleHostPlayAgain}
+                    className="w-full min-h-[56px] px-4 rounded-2xl bg-gradient-to-r from-emerald-400 via-emerald-500 to-teal-400 hover:brightness-110 disabled:opacity-60 text-slate-950 font-display font-extrabold text-sm sm:text-base tracking-wider uppercase flex items-center justify-center gap-2 shadow-[0_0_28px_rgba(16,185,129,0.45)] active:scale-[0.98] transition-all"
+                  >
+                    <span aria-hidden="true" className={rematchBusy ? 'animate-spin' : ''}>
+                      🔄
+                    </span>
+                    <span>
+                      {rematchBusy
+                        ? 'Resetting Squad to Lobby...'
+                        : 'PLAY AGAIN (SAME SQUAD)'}
+                    </span>
+                  </button>
+                ) : (
+                  <div className="w-full rounded-2xl bg-slate-900/90 border border-amber-400/35 px-4 py-3.5 text-center space-y-1 shadow-[0_0_20px_rgba(245,158,11,0.12)]">
+                    <div className="text-xs sm:text-sm font-display font-extrabold tracking-wider uppercase text-amber-200 flex items-center justify-center gap-2">
+                      <span className="inline-block animate-pulse">⏳</span>
+                      <span>WAITING FOR HOST TO START NEXT ROUND...</span>
+                    </div>
+                    <div className="text-[11px] font-mono text-slate-400">
+                      👑 Host: {hostLabel} · Your wristband stays linked
+                    </div>
+                  </div>
+                )}
+
+                {onOpenLeaderboard && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playUiClick();
+                      onOpenLeaderboard();
+                    }}
+                    className="w-full h-12 rounded-2xl bg-amber-500/15 hover:bg-amber-500/24 border border-amber-400/45 text-amber-200 font-display font-extrabold text-xs sm:text-sm tracking-wider uppercase flex items-center justify-center gap-2 shadow-[0_0_18px_rgba(245,158,11,0.16)] active:scale-95 transition-all"
+                  >
+                    <Trophy className="w-4 h-4 text-amber-300" />
+                    <span>🏆 Leaderboard</span>
+                  </button>
+                )}
+
+                {onExitMatch &&
+                  (isCurrentUserHost ? (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playUiClick();
+                        onExitMatch();
+                      }}
+                      className="w-full py-2.5 text-xs font-mono font-bold tracking-widest uppercase text-slate-400 hover:text-rose-300 transition-colors flex items-center justify-center gap-1.5"
+                    >
+                      <LogOut className="w-3.5 h-3.5" />
+                      <span>LEAVE ROOM</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playUiClick();
+                        onExitMatch();
+                      }}
+                      className="w-full h-12 rounded-2xl bg-slate-900/85 hover:bg-rose-500/15 border border-white/15 hover:border-rose-400/45 text-slate-200 hover:text-rose-200 font-display font-bold text-xs sm:text-sm tracking-wider uppercase flex items-center justify-center gap-2 active:scale-95 transition-all"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      <span>LEAVE ROOM</span>
+                    </button>
+                  ))}
+              </div>
             </div>
-            <button
-              type="button"
-              onClick={onResetMatch}
-              className="w-full h-14 rounded-2xl bg-gradient-to-r from-emerald-500 to-cyan-500 text-slate-950 font-display font-extrabold text-base tracking-wider uppercase flex items-center justify-center gap-2 active:scale-95 transition-all"
-            >
-              <RotateCcw className="w-5 h-5" />
-              <span>Return to Lobby</span>
-            </button>
           </div>
-        </div>
-      )}
+        );
+      })()}
 
       {exitConfirmationModal}
     </div>

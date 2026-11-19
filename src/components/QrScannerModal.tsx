@@ -7,6 +7,7 @@ import {
 import {
   AlertCircle,
   Camera,
+  CheckCircle2,
   ChevronDown,
   ChevronUp,
   QrCode,
@@ -53,6 +54,15 @@ interface QrScannerModalProps {
 
 const READER_ELEMENT_ID = 'campus-html5-qr-reader';
 
+interface VerifiedScanFeedback {
+  label: string;
+  sublabel: string;
+  tone: 'emerald' | 'rose' | 'violet';
+  accentHex?: string;
+}
+
+const VERIFIED_HOLD_MS = 580;
+
 export function QrScannerModal({
   mode,
   players = [],
@@ -86,6 +96,8 @@ export function QrScannerModal({
   const isRunningRef = useRef(false);
   const handledScanRef = useRef(false);
   const opChainRef = useRef<Promise<void>>(Promise.resolve());
+  const isMountedRef = useRef(true);
+  const errorShakeTimerRef = useRef<number | null>(null);
 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [cameraReady, setCameraReady] = useState(false);
@@ -96,7 +108,21 @@ export function QrScannerModal({
   const [selectedCameraId, setSelectedCameraId] = useState<string | null>(null);
   const [cameraRestartNonce, setCameraRestartNonce] = useState(0);
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
+  const [verifiedScan, setVerifiedScan] = useState<VerifiedScanFeedback | null>(
+    null
+  );
+  const [errorShakeActive, setErrorShakeActive] = useState(false);
   const [simDrawerOpen, setSimDrawerOpen] = useState(false);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (errorShakeTimerRef.current !== null) {
+        window.clearTimeout(errorShakeTimerRef.current);
+      }
+    };
+  }, []);
 
   const stopAndClearCamera = useCallback(async () => {
     const instance = scannerRef.current;
@@ -129,7 +155,41 @@ export function QrScannerModal({
       const rejectScan = (msg: string) => {
         playErrorFeedback();
         setScanFeedback(msg);
+        setErrorShakeActive(false);
+        window.requestAnimationFrame(() => {
+          if (isMountedRef.current) {
+            setErrorShakeActive(true);
+          }
+        });
+        if (errorShakeTimerRef.current !== null) {
+          window.clearTimeout(errorShakeTimerRef.current);
+        }
+        errorShakeTimerRef.current = window.setTimeout(() => {
+          if (isMountedRef.current) {
+            setErrorShakeActive(false);
+          }
+        }, 360);
         onScanError?.(msg);
+      };
+
+      const confirmVerifiedScan = async (
+        feedback: VerifiedScanFeedback,
+        playSfx: () => void,
+        dispatch: () => void
+      ) => {
+        handledScanRef.current = true;
+        setScanFeedback(null);
+        setErrorShakeActive(false);
+        setVerifiedScan(feedback);
+        playSfx();
+
+        const stopCameraPromise = stopAndClearCamera();
+        const holdPromise = new Promise<void>((resolve) => {
+          window.setTimeout(resolve, VERIFIED_HOLD_MS);
+        });
+        await Promise.all([stopCameraPromise, holdPromise]);
+        if (!isMountedRef.current) return;
+        dispatch();
       };
 
       const normalizedActiveRoom = activeRoomCode?.trim().toUpperCase();
@@ -151,16 +211,24 @@ export function QrScannerModal({
           rejectScan('Invalid QR. Scan a Player ID Card QR (#01–#16).');
           return;
         }
-        handledScanRef.current = true;
-        playIdCardScanSound();
-        await stopAndClearCamera();
-        if (parsed?.roomCode || parsed?.matchToken) {
-          onScanMeta?.({
-            roomCode: parsed.roomCode,
-            matchToken: parsed.matchToken,
-          });
-        }
-        onScanBadge?.(card.number);
+        await confirmVerifiedScan(
+          {
+            label: 'ID CARD VERIFIED',
+            sublabel: `${card.id} · ${card.colorName}`,
+            tone: 'emerald',
+            accentHex: card.colorHex,
+          },
+          playIdCardScanSound,
+          () => {
+            if (parsed?.roomCode || parsed?.matchToken) {
+              onScanMeta?.({
+                roomCode: parsed.roomCode,
+                matchToken: parsed.matchToken,
+              });
+            }
+            onScanBadge?.(card.number);
+          }
+        );
         return;
       }
 
@@ -222,10 +290,19 @@ export function QrScannerModal({
           return;
         }
 
-        handledScanRef.current = true;
-        playQrScanSuccess();
-        await stopAndClearCamera();
-        onScanStation?.(station.id);
+        await confirmVerifiedScan(
+          {
+            label: isSabotageTarget
+              ? 'SABOTAGE STATION VERIFIED'
+              : 'STATION QR VERIFIED',
+            sublabel: `${station.roomName} · ${station.taskTitle}`,
+            tone: 'emerald',
+          },
+          playQrScanSuccess,
+          () => {
+            onScanStation?.(station.id);
+          }
+        );
         return;
       }
 
@@ -259,10 +336,18 @@ export function QrScannerModal({
           return;
         }
 
-        handledScanRef.current = true;
-        playIdCardScanSound();
-        await stopAndClearCamera();
-        onScanBadge?.(card.number);
+        await confirmVerifiedScan(
+          {
+            label: 'TARGET ID VERIFIED',
+            sublabel: `${target.name} (${card.id})`,
+            tone: 'rose',
+            accentHex: card.colorHex,
+          },
+          playIdCardScanSound,
+          () => {
+            onScanBadge?.(card.number);
+          }
+        );
         return;
       }
 
@@ -284,10 +369,18 @@ export function QrScannerModal({
           return;
         }
 
-        handledScanRef.current = true;
-        playIdCardScanSound();
-        await stopAndClearCamera();
-        onScanBadge?.(card.number);
+        await confirmVerifiedScan(
+          {
+            label: 'BODY ID VERIFIED',
+            sublabel: `${target ? target.name : card.label} (${card.id})`,
+            tone: 'violet',
+            accentHex: card.colorHex,
+          },
+          playIdCardScanSound,
+          () => {
+            onScanBadge?.(card.number);
+          }
+        );
       }
     },
     [
@@ -497,17 +590,64 @@ export function QrScannerModal({
   );
   const deadTargets = players.filter((p) => p.status === 'eliminated');
 
+  const verifiedPalette =
+    verifiedScan?.tone === 'rose'
+      ? {
+          card: 'border-rose-400/75 shadow-[0_0_42px_rgba(244,63,94,0.34)]',
+          frame: 'border-rose-400/85 shadow-[0_0_30px_rgba(244,63,94,0.4)]',
+          bracket: 'border-rose-400 drop-shadow-[0_0_8px_rgba(251,113,133,0.95)]',
+          overlay: 'bg-rose-950/75',
+          ring: 'border-rose-400/80',
+          iconBg: 'bg-rose-500/20 border-rose-400/60 text-rose-300',
+          label: 'text-rose-200',
+        }
+      : verifiedScan?.tone === 'violet'
+      ? {
+          card: 'border-violet-400/75 shadow-[0_0_42px_rgba(139,92,246,0.34)]',
+          frame: 'border-violet-400/85 shadow-[0_0_30px_rgba(139,92,246,0.4)]',
+          bracket:
+            'border-violet-400 drop-shadow-[0_0_8px_rgba(167,139,250,0.95)]',
+          overlay: 'bg-violet-950/75',
+          ring: 'border-violet-400/80',
+          iconBg: 'bg-violet-500/20 border-violet-400/60 text-violet-200',
+          label: 'text-violet-200',
+        }
+      : {
+          card: 'border-emerald-400/75 shadow-[0_0_42px_rgba(16,185,129,0.36)]',
+          frame: 'border-emerald-400/85 shadow-[0_0_30px_rgba(16,185,129,0.42)]',
+          bracket:
+            'border-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.95)]',
+          overlay: 'bg-emerald-950/72',
+          ring: 'border-emerald-400/85',
+          iconBg: 'bg-emerald-500/20 border-emerald-400/60 text-emerald-300',
+          label: 'text-emerald-200',
+        };
+
   return (
     <div className="fixed inset-0 z-50 bg-[#060913]/92 backdrop-blur-xl flex items-end sm:items-center justify-center p-0 sm:p-4">
-      <div className="w-full max-w-md glass-card rounded-t-3xl sm:rounded-3xl p-4 space-y-3 max-h-[94dvh] overflow-y-auto">
+      <div
+        className={`w-full max-w-md glass-card rounded-t-3xl sm:rounded-3xl p-4 space-y-3 max-h-[94dvh] overflow-y-auto transition-[border-color,box-shadow] duration-200 ${
+          verifiedScan
+            ? `animate-qr-success-shake ${verifiedPalette.card}`
+            : errorShakeActive
+            ? 'animate-qr-error-shake border-amber-400/65'
+            : ''
+        }`}
+      >
         {/* Header */}
         <div className="flex items-center justify-between gap-2">
           <div className="min-w-0">
             <h2 className="font-display text-base font-extrabold tracking-wider uppercase text-white">
-              {titleByMode[mode]}
+              {verifiedScan ? verifiedScan.label : titleByMode[mode]}
             </h2>
-            <p className="text-[11px] text-slate-400 truncate">
-              {mode === 'station' && targetStation
+            <p
+              className={`text-[11px] truncate ${
+                verifiedScan ? verifiedPalette.label : 'text-slate-400'
+              }`}
+            >
+              {verifiedScan
+                ? `Verified · ${verifiedScan.sublabel}`
+                : mode === 'station' && targetStation
                 ? `Target: ${targetStation.roomName}`
                 : cameraStatusText}
             </p>
@@ -516,19 +656,21 @@ export function QrScannerModal({
             {availableCameras.length > 1 && (
               <button
                 type="button"
+                disabled={Boolean(verifiedScan)}
                 onClick={handleSwitchCamera}
                 aria-label="Switch camera"
                 title="Switch Camera"
-                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/10 text-cyan-300 hover:bg-white/15"
+                className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/10 text-cyan-300 hover:bg-white/15 disabled:opacity-40 disabled:pointer-events-none"
               >
                 <SwitchCamera className="w-4 h-4" />
               </button>
             )}
             <button
               type="button"
+              disabled={Boolean(verifiedScan)}
               onClick={() => void handleCloseModal()}
               aria-label="Close scanner"
-              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/10 text-slate-300 hover:text-white"
+              className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-xl bg-white/10 text-slate-300 hover:text-white disabled:opacity-40 disabled:pointer-events-none"
             >
               <X className="w-5 h-5" />
             </button>
@@ -536,13 +678,19 @@ export function QrScannerModal({
         </div>
 
         {/* Html5Qrcode Camera Viewfinder */}
-        <div className="relative h-64 w-full rounded-2xl overflow-hidden bg-slate-950 border border-white/15 flex items-center justify-center">
+        <div
+          className={`relative h-64 w-full rounded-2xl overflow-hidden bg-slate-950 border flex items-center justify-center transition-[border-color,box-shadow] duration-200 ${
+            verifiedScan
+              ? `animate-qr-success-pulse ${verifiedPalette.frame}`
+              : 'border-white/15'
+          }`}
+        >
           <div
             id={READER_ELEMENT_ID}
             className="w-full h-full [&_video]:w-full [&_video]:h-full [&_video]:object-cover"
           />
 
-          {!cameraReady && (
+          {!cameraReady && !verifiedScan && (
             <div className="absolute inset-0 flex flex-col items-center justify-center text-center px-5 space-y-2.5 bg-slate-950/92">
               <Camera className="w-7 h-7 text-cyan-400/80" />
               <p className="text-[11px] text-slate-300 leading-relaxed max-w-xs">
@@ -562,17 +710,80 @@ export function QrScannerModal({
           )}
 
           {/* Laser Corner Brackets */}
-          <span className="pointer-events-none absolute top-3 left-3 w-5 h-5 border-t-2 border-l-2 border-cyan-400 rounded-tl-md" />
-          <span className="pointer-events-none absolute top-3 right-3 w-5 h-5 border-t-2 border-r-2 border-cyan-400 rounded-tr-md" />
-          <span className="pointer-events-none absolute bottom-3 left-3 w-5 h-5 border-b-2 border-l-2 border-cyan-400 rounded-bl-md" />
-          <span className="pointer-events-none absolute bottom-3 right-3 w-5 h-5 border-b-2 border-r-2 border-cyan-400 rounded-br-md" />
+          <span
+            className={`pointer-events-none absolute top-3 left-3 w-5 h-5 border-t-2 border-l-2 rounded-tl-md transition-all duration-200 ${
+              verifiedScan
+                ? `${verifiedPalette.bracket} scale-110`
+                : 'border-cyan-400'
+            }`}
+          />
+          <span
+            className={`pointer-events-none absolute top-3 right-3 w-5 h-5 border-t-2 border-r-2 rounded-tr-md transition-all duration-200 ${
+              verifiedScan
+                ? `${verifiedPalette.bracket} scale-110`
+                : 'border-cyan-400'
+            }`}
+          />
+          <span
+            className={`pointer-events-none absolute bottom-3 left-3 w-5 h-5 border-b-2 border-l-2 rounded-bl-md transition-all duration-200 ${
+              verifiedScan
+                ? `${verifiedPalette.bracket} scale-110`
+                : 'border-cyan-400'
+            }`}
+          />
+          <span
+            className={`pointer-events-none absolute bottom-3 right-3 w-5 h-5 border-b-2 border-r-2 rounded-br-md transition-all duration-200 ${
+              verifiedScan
+                ? `${verifiedPalette.bracket} scale-110`
+                : 'border-cyan-400'
+            }`}
+          />
 
-          <div className="pointer-events-none absolute inset-x-5 top-0 animate-scanline">
-            <div className="h-0.5 w-full bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_14px_rgba(6,182,212,0.95)]" />
-          </div>
+          {!verifiedScan && (
+            <div className="pointer-events-none absolute inset-x-5 top-0 animate-scanline">
+              <div className="h-0.5 w-full bg-gradient-to-r from-transparent via-cyan-400 to-transparent shadow-[0_0_14px_rgba(6,182,212,0.95)]" />
+            </div>
+          )}
+
+          {/* Verified QR Confirmation Overlay */}
+          {verifiedScan && (
+            <div
+              role="status"
+              aria-live="polite"
+              className={`absolute inset-0 z-10 flex flex-col items-center justify-center px-5 text-center backdrop-blur-[3px] ${verifiedPalette.overlay}`}
+            >
+              <div className="relative flex items-center justify-center mb-3">
+                <span
+                  className={`pointer-events-none absolute w-16 h-16 rounded-full border-2 animate-qr-ring-burst ${verifiedPalette.ring}`}
+                />
+                <div
+                  className={`w-16 h-16 rounded-full border-2 flex items-center justify-center animate-qr-check-pop shadow-lg ${verifiedPalette.iconBg}`}
+                >
+                  <CheckCircle2 className="w-9 h-9" strokeWidth={2.4} />
+                </div>
+              </div>
+              <div className="font-display text-sm font-extrabold tracking-widest uppercase text-white">
+                {verifiedScan.label}
+              </div>
+              <div
+                className={`mt-1 flex items-center justify-center gap-1.5 text-xs font-mono font-semibold max-w-full ${verifiedPalette.label}`}
+              >
+                {verifiedScan.accentHex && (
+                  <span
+                    className="w-2.5 h-2.5 rounded-full border border-white/50 shrink-0"
+                    style={{
+                      backgroundColor: verifiedScan.accentHex,
+                      boxShadow: `0 0 8px ${verifiedScan.accentHex}`,
+                    }}
+                  />
+                )}
+                <span className="truncate">{verifiedScan.sublabel}</span>
+              </div>
+            </div>
+          )}
         </div>
 
-        {scanFeedback && (
+        {scanFeedback && !verifiedScan && (
           <div className="flex items-center gap-2 text-xs text-amber-300 bg-amber-950/60 border border-amber-500/40 rounded-xl px-3 py-2">
             <AlertCircle className="w-4 h-4 shrink-0" />
             <span>{scanFeedback}</span>

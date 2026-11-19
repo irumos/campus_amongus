@@ -290,14 +290,14 @@ export function playUiClick(): void {
   });
 }
 
-/** Crisp QR / ID Card scan confirmation chime + double haptic tap */
+/** Crisp QR / ID Card scan confirmation chime + distinct double haptic pulse */
 export function playQrScanSuccess(): void {
   runExclusiveSfx({
     key: 'qr_scan',
     priority: 2,
-    durationMs: 260,
+    durationMs: 280,
     cooldownMs: 250,
-    vibrate: [35, 35, 55],
+    vibrate: [38, 32, 80],
     render: (ctx, bus, register) => {
       scheduleToneOnBus(ctx, bus, register, 680, 65, 'sine', 0.08, 0);
       scheduleToneOnBus(ctx, bus, register, 960, 105, 'sine', 0.09, 0.06);
@@ -306,14 +306,14 @@ export function playQrScanSuccess(): void {
   });
 }
 
-/** Futuristic ID Card sync chime */
+/** Futuristic ID Card sync chime + tactile lock-in haptic pulse */
 export function playIdCardScanSound(): void {
   runExclusiveSfx({
     key: 'id_card_scan',
     priority: 2,
-    durationMs: 290,
+    durationMs: 300,
     cooldownMs: 280,
-    vibrate: [30, 30, 60],
+    vibrate: [35, 30, 85],
     render: (ctx, bus, register) => {
       scheduleToneOnBus(ctx, bus, register, 587.33, 60, 'triangle', 0.075, 0);
       scheduleToneOnBus(ctx, bus, register, 880, 75, 'sine', 0.085, 0.065);
@@ -403,56 +403,6 @@ export function playCountdownTick(urgent = false): void {
         urgent ? 0.06 : 0.038,
         0
       );
-    },
-  });
-}
-
-/** Industrial alternating klaxon for Reactor Meltdown sabotage */
-export function playSabotageAlarm(): void {
-  runExclusiveSfx({
-    key: 'sabotage_reactor',
-    priority: 3,
-    durationMs: 1260,
-    cooldownMs: 1200,
-    vibrate: [320, 120, 320, 120, 450],
-    render: (ctx, bus, register) => {
-      const hits = [0, 0.42, 0.84];
-      for (const offset of hits) {
-        const start = ctx.currentTime + offset;
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        osc.type = 'sawtooth';
-        osc.frequency.setValueAtTime(340, start);
-        osc.frequency.linearRampToValueAtTime(620, start + 0.16);
-        osc.frequency.linearRampToValueAtTime(280, start + 0.34);
-
-        gain.gain.setValueAtTime(0.0001, start);
-        gain.gain.linearRampToValueAtTime(0.08, start + 0.02);
-        gain.gain.exponentialRampToValueAtTime(0.0008, start + 0.36);
-
-        osc.connect(gain);
-        gain.connect(bus);
-        osc.start(start);
-        osc.stop(start + 0.37);
-        register(osc);
-      }
-    },
-  });
-}
-
-/** Radio scramble chirp for Comms Jam sabotage */
-export function playCommsJamSound(): void {
-  runExclusiveSfx({
-    key: 'sabotage_comms',
-    priority: 3,
-    durationMs: 520,
-    cooldownMs: 1100,
-    vibrate: [110, 60, 110, 60, 180],
-    render: (ctx, bus, register) => {
-      scheduleToneOnBus(ctx, bus, register, 880, 70, 'square', 0.048, 0);
-      scheduleToneOnBus(ctx, bus, register, 540, 80, 'sawtooth', 0.056, 0.08);
-      scheduleToneOnBus(ctx, bus, register, 320, 140, 'square', 0.052, 0.17);
-      scheduleToneOnBus(ctx, bus, register, 190, 200, 'sawtooth', 0.058, 0.29);
     },
   });
 }

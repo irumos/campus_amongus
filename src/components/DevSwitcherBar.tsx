@@ -8,6 +8,7 @@ import {
   Eye,
   Inbox,
   Lock,
+  Map as MapIcon,
   Radio,
   Sparkles,
   Users,
@@ -45,6 +46,7 @@ interface DevSwitcherBarProps {
   connectionStatus?: RealtimeConnectionStatus;
   reconnectAttempt?: number;
   wsLatencyMs?: number | null;
+  wakeLockActive?: boolean;
   isFloatingOnly?: boolean;
   isDebugMode?: boolean;
   onSelectPreset: (preset: DevPresetId) => void;
@@ -54,6 +56,7 @@ interface DevSwitcherBarProps {
   onSeedDemoPlayers: () => void;
   onRequestUnlock?: () => void;
   onOpenInsights?: () => void;
+  onOpenMapDesigner?: () => void;
   onOpenInbox?: () => void;
   onLockDevMode?: () => void;
 }
@@ -71,6 +74,7 @@ export function DevSwitcherBar({
   connectionStatus,
   reconnectAttempt = 0,
   wsLatencyMs = null,
+  wakeLockActive = false,
   isFloatingOnly = false,
   isDebugMode = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === 'true',
@@ -81,6 +85,7 @@ export function DevSwitcherBar({
   onSeedDemoPlayers,
   onRequestUnlock,
   onOpenInsights,
+  onOpenMapDesigner,
   onOpenInbox,
   onLockDevMode,
 }: DevSwitcherBarProps) {
@@ -182,6 +187,18 @@ export function DevSwitcherBar({
                 : 'LIVE'}
             </span>
           </div>
+
+          {wakeLockActive && (
+            <div
+              title="Screen Wake Lock active — display stays awake during active match"
+              className="h-7 px-2 rounded-full bg-amber-500/12 backdrop-blur-xl border border-amber-400/35 text-amber-200/95 flex items-center gap-1 text-[9px] font-mono font-bold tracking-wider uppercase whitespace-nowrap shrink-0 shadow-[0_0_10px_rgba(251,191,36,0.12)]"
+            >
+              <span aria-hidden="true" className="text-[10px] leading-none">
+                ☀️
+              </span>
+              <span>SCREEN AWAKE</span>
+            </div>
+          )}
 
           <span className="text-[11px] font-mono font-bold text-slate-400 truncate">
             {roomCode}
@@ -407,6 +424,21 @@ export function DevSwitcherBar({
                   <span>Sabotage</span>
                 </button>
               </div>
+
+              {onOpenMapDesigner && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    playUiClick();
+                    setOpen(false);
+                    onOpenMapDesigner();
+                  }}
+                  className="w-full min-h-[38px] rounded-xl bg-emerald-500/15 border border-emerald-400/35 text-[11px] font-bold text-emerald-200 hover:bg-emerald-500/25 flex items-center justify-center gap-1.5"
+                >
+                  <MapIcon className="w-3.5 h-3.5" />
+                  <span>Design Campus Map</span>
+                </button>
+              )}
 
               {onOpenInsights && (
                 <button

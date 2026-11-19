@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { WRISTBANDS } from '../config/campusConfig';
+import {
+  applyRemoteCampusMap,
+  type CampusMapConfig,
+} from '../config/mapStore';
 import { getActiveStations } from '../config/stationStore';
 import {
   formatSupabaseError,
@@ -11,7 +15,9 @@ import {
   supabaseConfigStatus,
   type PrivateRoleRow,
   type PublicPlayerRow,
+  type RoleType,
   type RoomRow,
+  type RoomStatus,
   type SabotageType,
   type VoteRow,
 } from '../config/supabase';
@@ -20,11 +26,16 @@ import {
   rotateMatchQrToken,
 } from '../config/matchQrStore';
 import {
-  playCommsJamSound,
   playEmergencySiren,
   playFlatlineEliminated,
-  playSabotageAlarm,
 } from '../utils/feedback';
+import {
+  awardTournamentPoints,
+  resetTournamentLeaderboard,
+  type TournamentAwardResult,
+  type TournamentMatchParticipantInput,
+} from '../config/tournamentStore';
+import { publishLocalSpectatorSnapshot } from './useSpectatorRoom';
 
 export type CampusRoomStatus = 'LOBBY' | 'PLAYING' | 'MEETING' | 'ENDED';
 export type CampusWinner = 'CREWMATES' | 'IMPOSTORS' | null;
@@ -249,6 +260,18 @@ export function badgeIdToNumber(badgeId: string): string {
 export function sanitizePlayerName(raw: string): string {
   const cleaned = raw.trim().slice(0, 32);
   return cleaned || 'Operative';
+}
+
+function pickRandomBadgeId(badgeIds: string[]): string | null {
+  if (badgeIds.length === 0) return null;
+  if (badgeIds.length === 1) return normalizeBadgeId(badgeIds[0]);
+  let idx = Math.floor(Math.random() * badgeIds.length);
+  if (typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function') {
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    idx = buf[0] % badgeIds.length;
+  }
+  return normalizeBadgeId(badgeIds[idx]);
 }
 
 function getOrCreateWristbandSecret(): string {
@@ -602,6 +625,59 @@ export function useCampusGame() {
     []
   );
 
+  const broadcastCampusMap = useCallback((mapConfig: CampusMapConfig) => {
+    const ch = roomChannelRef.current;
+    if (!ch) return;
+    // Strip oversized background data URLs over 180KB so Realtime payload stays fast & reliable
+    const safePayload: CampusMapConfig =
+      mapConfig.backgroundImageDataUrl &&
+      mapConfig.backgroundImageDataUrl.length > 180_000
+        ? { ...mapConfig, backgroundImageDataUrl: null }
+        : mapConfig;
+    void ch.send({
+      type: 'broadcast',
+      event: 'campus_map_sync',
+      payload: {
+        map: safePayload,
+        ts: Date.now(),
+      },
+    });
+  }, []);
+
+  const matchRoundIdRef = useRef<string>(`round_${Date.now()}`);
+  const matchStartedAtRef = useRef<number | null>(null);
+  const roundKillsRef = useRef<Record<string, number>>({});
+  const roundKillVictimsRef = useRef<Set<string>>(new Set());
+
+  const recordRoundKill = useCallback(
+    (killerBadgeId: string, victimBadgeId: string, broadcast = true) => {
+      const killer = normalizeBadgeId(killerBadgeId);
+      const victim = normalizeBadgeId(victimBadgeId);
+      if (roundKillVictimsRef.current.has(victim)) return;
+      roundKillVictimsRef.current.add(victim);
+      roundKillsRef.current = {
+        ...roundKillsRef.current,
+        [killer]: (roundKillsRef.current[killer] || 0) + 1,
+      };
+      if (broadcast) {
+        const ch = roomChannelRef.current;
+        if (ch) {
+          void ch.send({
+            type: 'broadcast',
+            event: 'campus_kill_credit',
+            payload: {
+              killer_badge_id: killer,
+              victim_badge_id: victim,
+              round_id: matchRoundIdRef.current,
+              ts: Date.now(),
+            },
+          });
+        }
+      }
+    },
+    []
+  );
+
   const reconcilePublicPlayers = useCallback(
     (
       roomCode: string,
@@ -707,6 +783,46 @@ export function useCampusGame() {
     }
   }, [privateRole]);
 
+  // Track round lifecycle (match start clock, unique match ID, and kill count reset)
+  const prevTournamentStatusRef = useRef<RoomStatus | null>(null);
+  useEffect(() => {
+    const status = room?.status ?? null;
+    const prev = prevTournamentStatusRef.current;
+    if (status === 'LOBBY') {
+      matchStartedAtRef.current = null;
+      roundKillsRef.current = {};
+      roundKillVictimsRef.current = new Set();
+      if (prev && prev !== 'LOBBY') {
+        setGhostModeActive(false);
+        setKillCooldownEnd(0);
+        setVotes({});
+      }
+    } else if (
+      status === 'PLAYING' &&
+      (prev === null || prev === 'LOBBY' || prev === 'ENDED')
+    ) {
+      const startedNow = Date.now();
+      matchStartedAtRef.current = startedNow;
+      // Round ID bucketed to 15s window so Host & Dev share the same deterministic matchId even across clients
+      matchRoundIdRef.current = `${Math.floor(startedNow / 15_000)}`;
+      roundKillsRef.current = {};
+      roundKillVictimsRef.current = new Set();
+    }
+    prevTournamentStatusRef.current = status;
+  }, [room?.status, room?.room_code]);
+
+  // Mirror STRICTLY SPOILER-FREE public state for local Spectator HQ mode
+  useEffect(() => {
+    if (!room) return;
+    publishLocalSpectatorSnapshot({
+      room,
+      publicPlayers,
+      votes,
+      matchStartedAt: matchStartedAtRef.current,
+      updatedAt: Date.now(),
+    });
+  }, [room, publicPlayers, votes]);
+
   // Trigger dramatic siren on MEETING or REACTOR sabotage, and flatline when eliminated
   useEffect(() => {
     if (!room) {
@@ -723,7 +839,6 @@ export function useCampusGame() {
       prevSabotageRef.current !== 'REACTOR'
     ) {
       sabotageActivatedAtRef.current = Date.now();
-      playSabotageAlarm();
       const targets = resolveSabotageTargets();
       appendImpostorOpsLog({
         roomCode: room.room_code,
@@ -736,7 +851,6 @@ export function useCampusGame() {
       room.active_sabotage === 'COMMS' &&
       prevSabotageRef.current !== 'COMMS'
     ) {
-      playCommsJamSound();
       const targets = resolveSabotageTargets();
       appendImpostorOpsLog({
         roomCode: room.room_code,
@@ -1129,6 +1243,35 @@ export function useCampusGame() {
                   : {}),
               };
             });
+          }
+        )
+        .on(
+          'broadcast',
+          { event: 'campus_map_sync' },
+          (msg: { payload?: Record<string, unknown> }) => {
+            const rawMap = msg?.payload?.map;
+            if (!rawMap) return;
+            const applied = applyRemoteCampusMap(rawMap);
+            if (applied) {
+              pushInsightEvent(
+                'CAMPUS_MAP_SYNCED',
+                `Received live campus blueprint "${applied.mapTitle}"`
+              );
+            }
+          }
+        )
+        .on(
+          'broadcast',
+          { event: 'campus_kill_credit' },
+          (msg: { payload?: Record<string, unknown> }) => {
+            const p = msg?.payload;
+            if (!p) return;
+            if (
+              typeof p.killer_badge_id === 'string' &&
+              typeof p.victim_badge_id === 'string'
+            ) {
+              recordRoundKill(p.killer_badge_id, p.victim_badge_id, false);
+            }
           }
         )
         .on(
@@ -2370,6 +2513,7 @@ export function useCampusGame() {
       const impostorsWin = livingImpostors >= livingCrewmates;
 
       if (!useRemoteSupabase || !supabase) {
+        recordRoundKill(currentIdentity.badgeId, victimBadgeId, false);
         appendImpostorOpsLog({
           roomCode: currentIdentity.roomCode,
           kind: 'KILL',
@@ -2412,6 +2556,8 @@ export function useCampusGame() {
         setSyncError(msg);
         return { ok: false, reason: `Elimination failed: ${msg}` };
       }
+
+      recordRoundKill(currentIdentity.badgeId, victimBadgeId, true);
 
       // Log successful elimination immediately with exact timestamp & victim badge ID
       appendImpostorOpsLog({
@@ -2463,6 +2609,7 @@ export function useCampusGame() {
       room?.status,
       publicPlayers,
       useRemoteSupabase,
+      recordRoundKill,
     ]
   );
 
@@ -3488,19 +3635,156 @@ export function useCampusGame() {
     }
   }, [identity?.roomCode, room?.room_code, publicPlayers, useRemoteSupabase]);
 
-  const resetRoom = useCallback(async (): Promise<void> => {
-    if (!identity?.roomCode) return;
-    const roomCode = identity.roomCode;
-    rotateMatchQrToken(roomCode);
-
-    if (!useRemoteSupabase || !supabase) {
-      setPublicPlayers((prev) =>
-        prev.map((p) => ({ ...p, is_alive: true, has_voted: false }))
+  const resetRoom = useCallback(
+    async (options?: {
+      isDeveloperOverride?: boolean;
+      roomCodeOverride?: string;
+    }): Promise<{ ok: boolean; reason?: string }> => {
+      const targetRoomCode = normalizeRoomCode(
+        options?.roomCodeOverride || identity?.roomCode || room?.room_code || ''
       );
-      setRoom((prev) =>
-        prev
-          ? {
-              ...prev,
+      if (!targetRoomCode) {
+        return { ok: false, reason: 'No active room found to reset.' };
+      }
+
+      const isDevOverride = Boolean(options?.isDeveloperOverride);
+      const callerBadgeId = identity?.badgeId
+        ? normalizeBadgeId(identity.badgeId)
+        : null;
+      const callerSecret =
+        identity?.wristbandSecret ||
+        (typeof window !== 'undefined'
+          ? localStorage.getItem(SECRET_STORAGE_KEY)
+          : null) ||
+        null;
+
+      // Enforce strict Host-only rematch permissions unless Developer override is explicitly enabled
+      if (!isDevOverride) {
+        const hostCheck = await verifyHostPrivileges(
+          targetRoomCode,
+          isDevOverride
+        );
+        if (!hostCheck.ok) {
+          return {
+            ok: false,
+            reason:
+              hostCheck.reason ||
+              'Only the designated Room Host can start a rematch.',
+          };
+        }
+      }
+
+      rotateMatchQrToken(targetRoomCode);
+      matchStartedAtRef.current = null;
+      matchRoundIdRef.current = `round_${Date.now()}`;
+      roundKillsRef.current = {};
+      roundKillVictimsRef.current = new Set();
+
+      const applyLocalLobbyReset = () => {
+        setGhostModeActive(false);
+        setKillCooldownEnd(0);
+        setVotes({});
+        setPublicPlayers((prev) =>
+          prev.map((p) => ({ ...p, is_alive: true, has_voted: false }))
+        );
+        setPrivateRole((prev) =>
+          prev
+            ? {
+                ...prev,
+                role: 'CREWMATE',
+                assigned_tasks: [],
+                completed_tasks: [],
+                fellow_impostors: [],
+                kill_cooldown_ends_at: null,
+              }
+            : prev
+        );
+        setRoom((prev) =>
+          prev && normalizeRoomCode(prev.room_code) === targetRoomCode
+            ? {
+                ...prev,
+                status: 'LOBBY',
+                winner: null,
+                task_progress: 0,
+                active_sabotage: null,
+                sabotage_ends_at: null,
+                meeting_ends_at: null,
+                ejection_result: null,
+                meeting_caller_badge_id: null,
+                meeting_body_badge_id: null,
+              }
+            : prev
+        );
+      };
+
+      if (!useRemoteSupabase || !supabase) {
+        applyLocalLobbyReset();
+        return { ok: true };
+      }
+
+      // 1. Primary path: invoke authoritative `reset_room_for_rematch` Supabase RPC
+      try {
+        const { data: rpcData, error: rpcError } = await supabase.rpc(
+          'reset_room_for_rematch',
+          {
+            p_room_code: targetRoomCode,
+            p_caller_badge_id: callerBadgeId,
+            p_wristband_secret: callerSecret,
+            p_is_dev_override: isDevOverride,
+          }
+        );
+
+        if (!rpcError) {
+          const parsed = (rpcData || {}) as { ok?: boolean; reason?: string };
+          if (parsed.ok === false) {
+            return {
+              ok: false,
+              reason:
+                parsed.reason ||
+                'Host verification failed for rematch reset.',
+            };
+          }
+          applyLocalLobbyReset();
+          return { ok: true };
+        }
+
+        const errText =
+          `${rpcError.code || ''} ${rpcError.message || ''}`.toLowerCase();
+        const isMissingRpc =
+          rpcError.code === '42883' ||
+          rpcError.code === 'PGRST202' ||
+          errText.includes('could not find the function') ||
+          errText.includes('does not exist');
+
+        if (!isMissingRpc) {
+          logSupabaseTableError('rooms', 'resetRoomForRematchRpc', rpcError);
+        }
+      } catch (err) {
+        logSupabaseTableError('rooms', 'resetRoomForRematchRpcCatch', err);
+      }
+
+      // 2. Fallback path if RPC is not yet deployed in Supabase SQL Editor
+      // (Preserves every player's wristband_secret in private_roles & localStorage)
+      const [delVotesRes, resetPlayersRes, resetRolesRes, resetRoomRes] =
+        await Promise.all([
+          supabase.from('votes').delete().eq('room_code', targetRoomCode),
+          supabase
+            .from('public_players')
+            .update({ is_alive: true, has_voted: false })
+            .eq('room_code', targetRoomCode),
+          supabase
+            .from('private_roles')
+            .update({
+              role: 'CREWMATE',
+              assigned_tasks: [],
+              completed_tasks: [],
+              fellow_impostors: [],
+              kill_cooldown_ends_at: null,
+            })
+            .eq('room_code', targetRoomCode),
+          supabase
+            .from('rooms')
+            .update({
               status: 'LOBBY',
               winner: null,
               task_progress: 0,
@@ -3510,47 +3794,47 @@ export function useCampusGame() {
               ejection_result: null,
               meeting_caller_badge_id: null,
               meeting_body_badge_id: null,
-            }
-          : prev
-      );
-      return;
-    }
+            })
+            .eq('room_code', targetRoomCode),
+        ]);
 
-    const [delVotesRes, resetPlayersRes, resetRoomRes] = await Promise.all([
-      supabase.from('votes').delete().eq('room_code', roomCode),
-      supabase
-        .from('public_players')
-        .update({ is_alive: true, has_voted: false })
-        .eq('room_code', roomCode),
-      supabase
-        .from('rooms')
-        .update({
-          status: 'LOBBY',
-          winner: null,
-          task_progress: 0,
-          active_sabotage: null,
-          sabotage_ends_at: null,
-          meeting_ends_at: null,
-          ejection_result: null,
-          meeting_caller_badge_id: null,
-          meeting_body_badge_id: null,
-        })
-        .eq('room_code', roomCode),
-    ]);
-    if (delVotesRes.error) {
-      logSupabaseTableError('votes', 'resetRoomDelete', delVotesRes.error);
-    }
-    if (resetPlayersRes.error) {
-      logSupabaseTableError(
-        'public_players',
-        'resetRoomUpdate',
-        resetPlayersRes.error
-      );
-    }
-    if (resetRoomRes.error) {
-      logSupabaseTableError('rooms', 'resetRoomUpdate', resetRoomRes.error);
-    }
-  }, [identity?.roomCode, useRemoteSupabase]);
+      if (delVotesRes.error) {
+        logSupabaseTableError('votes', 'resetRoomDelete', delVotesRes.error);
+      }
+      if (resetPlayersRes.error) {
+        logSupabaseTableError(
+          'public_players',
+          'resetRoomUpdate',
+          resetPlayersRes.error
+        );
+      }
+      if (resetRolesRes.error) {
+        logSupabaseTableError(
+          'private_roles',
+          'resetRoomUpdate',
+          resetRolesRes.error
+        );
+      }
+      if (resetRoomRes.error) {
+        logSupabaseTableError('rooms', 'resetRoomUpdate', resetRoomRes.error);
+        return {
+          ok: false,
+          reason: formatSupabaseError(resetRoomRes.error),
+        };
+      }
+
+      applyLocalLobbyReset();
+      return { ok: true };
+    },
+    [
+      identity?.roomCode,
+      identity?.badgeId,
+      identity?.wristbandSecret,
+      room?.room_code,
+      useRemoteSupabase,
+      verifyHostPrivileges,
+    ]
+  );
 
   // Auto-tally when all living players have voted OR 60s timer expires
   useEffect(() => {
@@ -3966,9 +4250,30 @@ export function useCampusGame() {
     async (rawRoomCode: string, rawBadgeId: string): Promise<void> => {
       const roomCode = normalizeRoomCode(rawRoomCode);
       const badgeId = normalizeBadgeId(rawBadgeId);
+      const wasHost = Boolean(
+        room?.host_badge_id &&
+          normalizeBadgeId(room.host_badge_id) === badgeId
+      );
 
       if (!useRemoteSupabase || !supabase) {
-        setPublicPlayers((prev) => prev.filter((p) => p.badge_id !== badgeId));
+        const remainingLocal = publicPlayers.filter((p) => p.badge_id !== badgeId);
+        setPublicPlayers(remainingLocal);
+        if (wasHost) {
+          const nextRandomHost = pickRandomBadgeId(
+            remainingLocal.map((p) => p.badge_id)
+          );
+          setRoom((prev) =>
+            prev && prev.room_code === roomCode
+              ? { ...prev, host_badge_id: nextRandomHost }
+              : prev
+          );
+          pushInsightEvent(
+            'HOST_AUTO_REASSIGNED',
+            nextRandomHost
+              ? `Host ${badgeId} removed — randomly assigned ${nextRandomHost} as new Host`
+              : `Host ${badgeId} removed — room empty, next joiner will become Host`
+          );
+        }
         pushInsightEvent('CANDIDATE_REMOVED', `Removed ${badgeId} from ${roomCode}`);
         return;
       }
@@ -4008,10 +4313,53 @@ export function useCampusGame() {
         );
       }
 
+      if (wasHost) {
+        const { data: remRows, error: remErr } = await supabase
+          .from('public_players')
+          .select('badge_id')
+          .eq('room_code', roomCode);
+        if (remErr) {
+          logSupabaseTableError('public_players', 'removeHostSelectRem', remErr);
+        } else {
+          const remainingBadges = ((remRows || []) as { badge_id: string }[])
+            .map((r) => normalizeBadgeId(r.badge_id))
+            .filter((id) => id !== badgeId);
+          const nextRandomHost = pickRandomBadgeId(remainingBadges);
+          setRoom((prev) =>
+            prev && prev.room_code === roomCode
+              ? { ...prev, host_badge_id: nextRandomHost }
+              : prev
+          );
+          broadcastHostSettings({ host_badge_id: nextRandomHost });
+          const { error: hostUpdErr } = await supabase
+            .from('rooms')
+            .update({ host_badge_id: nextRandomHost })
+            .eq('room_code', roomCode)
+            .eq('host_badge_id', badgeId);
+          if (hostUpdErr && !isMissingOptionalColumnError(hostUpdErr)) {
+            logSupabaseTableError('rooms', 'removeCandidateReassignHost', hostUpdErr);
+          }
+          pushInsightEvent(
+            'HOST_AUTO_REASSIGNED',
+            nextRandomHost
+              ? `Host ${badgeId} removed — randomly assigned ${nextRandomHost} as new Host`
+              : `Host ${badgeId} removed — room empty, next joiner will become Host`
+          );
+        }
+      }
+
       pushInsightEvent('CANDIDATE_REMOVED', `Removed ${badgeId} from ${roomCode}`);
       await fetchRoomState(roomCode, identity?.badgeId);
     },
-    [pushInsightEvent, fetchRoomState, identity?.badgeId, useRemoteSupabase]
+    [
+      room?.host_badge_id,
+      publicPlayers,
+      pushInsightEvent,
+      fetchRoomState,
+      identity?.badgeId,
+      useRemoteSupabase,
+      broadcastHostSettings,
+    ]
   );
 
   const toggleCandidateAlive = useCallback(
@@ -4051,6 +4399,38 @@ export function useCampusGame() {
   const leaveRoom = useCallback(() => {
     const leavingIdentity = identity;
     const leavingRoomStatus = room?.status;
+    const leavingHostBadgeId = room?.host_badge_id
+      ? normalizeBadgeId(room.host_badge_id)
+      : null;
+    const normalizedLeavingBadge = leavingIdentity
+      ? normalizeBadgeId(leavingIdentity.badgeId)
+      : null;
+    const wasHost = Boolean(
+      normalizedLeavingBadge &&
+        leavingHostBadgeId &&
+        normalizedLeavingBadge === leavingHostBadgeId
+    );
+    const localRemainingBadges = normalizedLeavingBadge
+      ? publicPlayers
+          .map((p) => normalizeBadgeId(p.badge_id))
+          .filter((id) => id !== normalizedLeavingBadge)
+      : [];
+    const preselectedRandomHost = wasHost
+      ? pickRandomBadgeId(localRemainingBadges)
+      : null;
+    const activeChannelBeforeLeave = roomChannelRef.current;
+
+    // Immediately broadcast new random Host before local channel unsubscribes
+    if (wasHost && activeChannelBeforeLeave) {
+      void activeChannelBeforeLeave.send({
+        type: 'broadcast',
+        event: 'room_host_sync',
+        payload: {
+          host_badge_id: preselectedRandomHost,
+          ts: Date.now(),
+        },
+      });
+    }
 
     localFallbackVotesRef.current = {};
     localFallbackRolesRef.current = {};
@@ -4077,6 +4457,7 @@ export function useCampusGame() {
     if (useRemoteSupabase && supabase && leavingIdentity) {
       const client = supabase;
       const { roomCode, badgeId } = leavingIdentity;
+      const normalizedBadge = normalizeBadgeId(badgeId);
       void (async () => {
         try {
           const [delVoteRes, delRoleRes, delPlayerRes] = await Promise.all([
@@ -4113,6 +4494,76 @@ export function useCampusGame() {
               'leaveRoomDelete',
               delPlayerRes.error
             );
+          }
+
+          // Reassign Host randomly to a remaining player if the leaving player was the Host
+          const { data: roomCheckRow, error: roomCheckErr } = await client
+            .from('rooms')
+            .select('host_badge_id')
+            .eq('room_code', roomCode)
+            .maybeSingle();
+
+          const dbHostBadge =
+            !roomCheckErr &&
+            roomCheckRow &&
+            typeof (roomCheckRow as { host_badge_id?: string | null }).host_badge_id ===
+              'string' &&
+            (roomCheckRow as { host_badge_id?: string | null }).host_badge_id?.trim()
+              ? normalizeBadgeId(
+                  (roomCheckRow as { host_badge_id: string }).host_badge_id
+                )
+              : null;
+
+          const isAuthoritativeHostLeaving =
+            wasHost || dbHostBadge === normalizedBadge;
+
+          if (isAuthoritativeHostLeaving) {
+            const { data: remAfterHostLeave, error: remHostErr } = await client
+              .from('public_players')
+              .select('badge_id')
+              .eq('room_code', roomCode);
+
+            if (remHostErr) {
+              logSupabaseTableError(
+                'public_players',
+                'leaveRoomSelectRemainingForHost',
+                remHostErr
+              );
+            } else {
+              const authoritativeRemaining = (
+                (remAfterHostLeave || []) as { badge_id: string }[]
+              )
+                .map((r) => normalizeBadgeId(r.badge_id))
+                .filter((id) => id !== normalizedBadge);
+
+              // Use preselected random host if still present in authoritative roster; otherwise pick fresh random
+              const nextRandomHost =
+                preselectedRandomHost &&
+                authoritativeRemaining.includes(preselectedRandomHost)
+                  ? preselectedRandomHost
+                  : pickRandomBadgeId(authoritativeRemaining);
+
+              const { error: reassignErr } = await client
+                .from('rooms')
+                .update({ host_badge_id: nextRandomHost })
+                .eq('room_code', roomCode)
+                .eq('host_badge_id', normalizedBadge);
+
+              if (reassignErr && !isMissingOptionalColumnError(reassignErr)) {
+                logSupabaseTableError(
+                  'rooms',
+                  'leaveRoomReassignHost',
+                  reassignErr
+                );
+              } else {
+                pushInsightEvent(
+                  'HOST_AUTO_REASSIGNED',
+                  nextRandomHost
+                    ? `Host ${normalizedBadge} exited — randomly assigned ${nextRandomHost} as new Host`
+                    : `Host ${normalizedBadge} exited — room empty, next joiner will become Host`
+                );
+              }
+            }
           }
 
           if (
@@ -4183,7 +4634,14 @@ export function useCampusGame() {
         }
       })();
     }
-  }, [identity, room?.status, useRemoteSupabase, pushInsightEvent]);
+  }, [
+    identity,
+    room?.status,
+    room?.host_badge_id,
+    publicPlayers,
+    useRemoteSupabase,
+    pushInsightEvent,
+  ]);
 
   const myPlayerRow = useMemo(
     () =>
@@ -4328,6 +4786,131 @@ export function useCampusGame() {
     [room?.active_sabotage]
   );
 
+  const awardCurrentMatchTournamentPoints = useCallback(
+    async (options?: {
+      isDeveloperOverride?: boolean;
+    }): Promise<TournamentAwardResult | null> => {
+      if (!room || room.status !== 'ENDED' || !room.winner) {
+        return null;
+      }
+
+      const activeRoomCode = normalizeRoomCode(room.room_code);
+      const myBadge = identityRef.current?.badgeId
+        ? normalizeBadgeId(identityRef.current.badgeId)
+        : null;
+      const isHost = Boolean(
+        room.host_badge_id &&
+          myBadge &&
+          normalizeBadgeId(room.host_badge_id) === myBadge
+      );
+      const isDev = Boolean(options?.isDeveloperOverride);
+
+      if (!isHost && !isDev) {
+        return null;
+      }
+
+      let rolesByBadge: Record<string, PrivateRoleRow> = {};
+      if (!useRemoteSupabase || !supabase) {
+        rolesByBadge = { ...localFallbackRolesRef.current };
+      } else {
+        const { data, error } = await supabase
+          .from('private_roles')
+          .select('*')
+          .eq('room_code', activeRoomCode);
+        if (!error && Array.isArray(data)) {
+          for (const row of data as PrivateRoleRow[]) {
+            rolesByBadge[normalizeBadgeId(row.badge_id)] = row;
+          }
+        } else {
+          rolesByBadge = { ...devAllRoles };
+        }
+      }
+
+      const roster = publicPlayers;
+      if (roster.length === 0) return null;
+
+      // Determine elimination credits per Impostor
+      const killCounts: Record<string, number> = { ...roundKillsRef.current };
+      const impostorBadges = roster
+        .filter((p) => rolesByBadge[normalizeBadgeId(p.badge_id)]?.role === 'IMPOSTOR')
+        .map((p) => normalizeBadgeId(p.badge_id));
+      const totalRecordedKills = Object.values(killCounts).reduce(
+        (sum, n) => sum + n,
+        0
+      );
+      const eliminatedCrewCount = roster.filter((p) => {
+        const role = rolesByBadge[normalizeBadgeId(p.badge_id)]?.role;
+        return !p.is_alive && role !== 'IMPOSTOR';
+      }).length;
+
+      // If kills happened while Host/Dev missed a live broadcast, attribute remaining dead crewmates evenly across impostors
+      if (
+        impostorBadges.length > 0 &&
+        eliminatedCrewCount > totalRecordedKills
+      ) {
+        let missing = eliminatedCrewCount - totalRecordedKills;
+        let idx = 0;
+        while (missing > 0) {
+          const impBadge = impostorBadges[idx % impostorBadges.length];
+          killCounts[impBadge] = (killCounts[impBadge] || 0) + 1;
+          missing -= 1;
+          idx += 1;
+        }
+      }
+
+      const participants: TournamentMatchParticipantInput[] = roster.map(
+        (player) => {
+          const bId = normalizeBadgeId(player.badge_id);
+          const roleRow = rolesByBadge[bId];
+          const role: RoleType = roleRow?.role === 'IMPOSTOR' ? 'IMPOSTOR' : 'CREWMATE';
+          const tasksCompleted = Array.isArray(roleRow?.completed_stations)
+            ? roleRow.completed_stations.length
+            : 0;
+          const eliminations = role === 'IMPOSTOR' ? killCounts[bId] || 0 : 0;
+
+          return {
+            playerName: player.name,
+            badgeId: bId,
+            color: player.color,
+            role,
+            isAlive: player.is_alive,
+            tasksCompleted,
+            eliminations,
+          };
+        }
+      );
+
+      const matchId = `${activeRoomCode}_${matchRoundIdRef.current}_${room.winner}`;
+      const result = await awardTournamentPoints({
+        matchId,
+        roomCode: activeRoomCode,
+        winner: room.winner,
+        participants,
+      });
+
+      if (result.ok && !result.alreadyScored) {
+        pushInsightEvent(
+          'TOURNAMENT_SCORED',
+          `Awarded ${room.winner} round points to ${result.updatedCount} operatives via ${result.source.toUpperCase()}`
+        );
+      }
+
+      return result;
+    },
+    [room, publicPlayers, useRemoteSupabase, devAllRoles, pushInsightEvent]
+  );
+
+  const resetTournamentScores = useCallback(async () => {
+    const res = await resetTournamentLeaderboard();
+    pushInsightEvent(
+      'TOURNAMENT_RESET',
+      res.error
+        ? `Local leaderboard cleared (${res.error})`
+        : 'Campus Tournament Leaderboard reset to zero'
+    );
+    return res;
+  }, [pushInsightEvent]);
+
   return {
     isSupabaseConfigured: isSupabaseConfigured && !forceLocalMode,
     supabaseConfigStatus,
@@ -4382,6 +4965,10 @@ export function useCampusGame() {
     finalizeMeeting,
     dismissEjection,
     resetRoom,
+    resetRoomForRematch: resetRoom,
     leaveRoom,
+    broadcastCampusMap,
+    awardCurrentMatchTournamentPoints,
+    resetTournamentScores,
   };
 }

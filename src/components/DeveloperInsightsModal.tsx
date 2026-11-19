@@ -15,8 +15,10 @@ import {
   Inbox,
   KeyRound,
   Lock,
+  Map as MapIcon,
   MapPin,
   Megaphone,
+  Monitor,
   Play,
   Plus,
   Printer,
@@ -25,6 +27,7 @@ import {
   RotateCcw,
   Skull,
   Trash2,
+  Trophy,
   UserPlus,
   Users,
   Wrench,
@@ -64,7 +67,10 @@ import {
   type CampusLocalIdentity,
   type RealtimeConnectionStatus,
 } from '../hooks/useCampusGame';
+import type { CampusMapConfig } from '../config/mapStore';
+import { useTournamentLeaderboard } from '../config/tournamentStore';
 import { playTaskSuccessFeedback, playUiClick } from '../utils/feedback';
+import { DeveloperMapEditor } from './DeveloperMapEditor';
 import type { DevPresetId } from './DevSwitcherBar';
 
 export interface DeveloperInsightEvent {
@@ -98,7 +104,7 @@ interface DeveloperInsightsModalProps {
   votes: Record<string, string>;
   events: DeveloperInsightEvent[];
   inboxMessages?: DevInboxMessage[];
-  initialTab?: 'lobby' | 'rooms' | 'analytics' | 'inbox';
+  initialTab?: 'lobby' | 'rooms' | 'map' | 'analytics' | 'inbox';
   recentLobbies: string[];
   activeRoomCodeDraft: string;
   hasActiveOverride?: boolean;
@@ -126,7 +132,7 @@ interface DeveloperInsightsModalProps {
   onSeedDemoPlayers: (roomCode?: string) => Promise<void>;
   onSetImpostorCount: (count: 1 | 2 | 3) => Promise<void>;
   onStartMatch: (roomCode: string, impostorCount: 1 | 2 | 3) => Promise<void>;
-  onResetMatch: () => Promise<void>;
+  onResetMatch: (roomCode?: string) => Promise<void>;
   onDevTriggerSabotage?: (type: 'REACTOR' | 'COMMS') => Promise<void>;
   onDevClearSabotage?: () => Promise<void>;
   onDevResetKillCooldown?: () => void;
@@ -139,6 +145,9 @@ interface DeveloperInsightsModalProps {
   onClearInbox?: () => void;
   onSelectPreset: (preset: DevPresetId) => void;
   onTestStationMiniGame: (station: CampusTaskStationConfig) => void;
+  onSyncCampusMap?: (config: CampusMapConfig) => void;
+  onOpenSpectator?: () => void;
+  onResetTournamentLeaderboard?: () => Promise<void>;
   onClearEvents: () => void;
   onLockDevMode: () => void;
   onClose: () => void;
@@ -222,17 +231,28 @@ export function DeveloperInsightsModal({
   onClearInbox,
   onSelectPreset,
   onTestStationMiniGame,
+  onSyncCampusMap,
+  onOpenSpectator,
+  onResetTournamentLeaderboard,
   onClearEvents,
   onLockDevMode,
   onClose,
 }: DeveloperInsightsModalProps) {
   const stations = useCampusStations();
+  const { entries: tournamentEntries } = useTournamentLeaderboard();
+  const [confirmResetLeaderboard, setConfirmResetLeaderboard] = useState(false);
+
+  const [studioWorkspace, setStudioWorkspace] = useState<'ops' | 'map'>(
+    initialTab === 'map' ? 'map' : 'ops'
+  );
 
   // Mobile/compact tab selector (ignored on lg: where all 3 columns render side-by-side)
   const [mobileTab, setMobileTab] = useState<'lobby' | 'rooms' | 'telemetry'>(
     initialTab === 'inbox' || initialTab === 'analytics'
       ? 'telemetry'
-      : initialTab
+      : initialTab === 'rooms'
+      ? 'rooms'
+      : 'lobby'
   );
   const [rightPaneTab, setRightPaneTab] = useState<
     'analytics' | 'inbox' | 'telemetry'
@@ -571,42 +591,91 @@ export function DeveloperInsightsModal({
           </div>
         </div>
 
-        {/* Universal 1-Tap Screen Switcher Strip (All Viewports, Auto-Closes into Selected View) */}
-        <div className="shrink-0 flex items-center gap-1.5 overflow-x-auto pb-0.5">
-          {onReturnToLiveGame && (
+        {/* Universal Workspace Switcher + 1-Tap Screen Switcher Strip */}
+        <div className="shrink-0 flex items-center justify-between gap-2 overflow-x-auto pb-0.5">
+          <div className="flex items-center gap-1 p-1 rounded-xl bg-slate-950/90 border border-white/10 shrink-0">
             <button
               type="button"
               onClick={() => {
                 playUiClick();
-                onReturnToLiveGame();
-                onClose();
+                setStudioWorkspace('ops');
               }}
-              className={`shrink-0 h-8 px-2.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1 border transition-all whitespace-nowrap ${
-                hasActiveOverride
-                  ? 'bg-emerald-500 text-slate-950 border-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.4)]'
-                  : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/25'
+              className={`h-7 px-3 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                studioWorkspace === 'ops'
+                  ? 'bg-cyan-400 text-slate-950'
+                  : 'text-slate-300 hover:text-white'
               }`}
             >
-              <Radio className="w-3 h-3" />
-              <span>Live Game</span>
+              <Wrench className="w-3 h-3" />
+              <span>Command Center</span>
             </button>
-          )}
-          <div className="flex items-center gap-1 bg-slate-950/80 border border-white/10 rounded-xl p-1 shrink-0">
-            {quickNavItems.map((item) => (
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                setStudioWorkspace('map');
+              }}
+              className={`h-7 px-3 rounded-lg text-[11px] font-bold flex items-center gap-1.5 transition-colors whitespace-nowrap shrink-0 ${
+                studioWorkspace === 'map'
+                  ? 'bg-emerald-400 text-slate-950'
+                  : 'text-emerald-200 hover:text-white'
+              }`}
+            >
+              <MapIcon className="w-3 h-3" />
+              <span>Map Designer</span>
+            </button>
+            {onOpenSpectator && (
               <button
-                key={item.id}
                 type="button"
                 onClick={() => {
                   playUiClick();
-                  onSelectPreset(item.id);
+                  onOpenSpectator();
                   onClose();
                 }}
-                className="h-7 px-2.5 rounded-lg text-[11px] font-bold text-slate-300 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1 whitespace-nowrap"
+                className="h-7 px-3 rounded-lg text-[11px] font-bold flex items-center gap-1.5 text-amber-200 hover:text-white hover:bg-amber-500/20 transition-colors whitespace-nowrap shrink-0"
               >
-                {item.id === 'print' && <Printer className="w-3 h-3" />}
-                <span>{item.label}</span>
+                <Monitor className="w-3 h-3" />
+                <span>Projector HQ</span>
               </button>
-            ))}
+            )}
+          </div>
+
+          <div className="flex items-center gap-1.5 shrink-0">
+            {onReturnToLiveGame && (
+              <button
+                type="button"
+                onClick={() => {
+                  playUiClick();
+                  onReturnToLiveGame();
+                  onClose();
+                }}
+                className={`shrink-0 h-8 px-2.5 rounded-lg text-[11px] font-extrabold uppercase tracking-wide flex items-center gap-1 border transition-all whitespace-nowrap ${
+                  hasActiveOverride
+                    ? 'bg-emerald-500 text-slate-950 border-emerald-300 shadow-[0_0_12px_rgba(16,185,129,0.4)]'
+                    : 'bg-emerald-500/15 border-emerald-500/35 text-emerald-300 hover:bg-emerald-500/25'
+                }`}
+              >
+                <Radio className="w-3 h-3" />
+                <span>Live Game</span>
+              </button>
+            )}
+            <div className="flex items-center gap-1 bg-slate-950/80 border border-white/10 rounded-xl p-1 shrink-0">
+              {quickNavItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => {
+                    playUiClick();
+                    onSelectPreset(item.id);
+                    onClose();
+                  }}
+                  className="h-7 px-2.5 rounded-lg text-[11px] font-bold text-slate-300 hover:text-white hover:bg-white/10 transition-colors flex items-center gap-1 whitespace-nowrap"
+                >
+                  {item.id === 'print' && <Printer className="w-3 h-3" />}
+                  <span>{item.label}</span>
+                </button>
+              ))}
+            </div>
           </div>
         </div>
 
@@ -616,7 +685,15 @@ export function DeveloperInsightsModal({
           </div>
         )}
 
-        {/* Mobile/Tablet Segment Tabs (Hidden on lg: laptop layout) */}
+        {studioWorkspace === 'map' ? (
+          <DeveloperMapEditor
+            activeRoomCode={activeLobbyCode}
+            onSyncMapToRoom={onSyncCampusMap}
+            onNotice={flashNotice}
+          />
+        ) : (
+          <>
+            {/* Mobile/Tablet Segment Tabs (Hidden on lg: laptop layout) */}
         <div className="shrink-0 lg:hidden grid grid-cols-3 gap-1 p-1 rounded-xl bg-slate-950/85 border border-white/10">
           <button
             type="button"
@@ -1164,16 +1241,76 @@ export function DeveloperInsightsModal({
                   type="button"
                   onClick={() => {
                     playUiClick();
-                    void onResetMatch().then(() =>
-                      flashNotice(`Reset ${activeLobbyCode} to LOBBY`)
+                    void onResetMatch(activeLobbyCode).then(() =>
+                      flashNotice(`Reset Room ${activeLobbyCode} for Rematch`)
                     );
                   }}
                   className="h-9 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold uppercase flex items-center justify-center gap-1.5"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>Reset Lobby</span>
+                  <span>Reset Room</span>
                 </button>
               </div>
+
+              {onResetTournamentLeaderboard && (
+                <div className="pt-2 border-t border-white/10 shrink-0">
+                  {confirmResetLeaderboard ? (
+                    <div className="rounded-xl bg-rose-950/70 border border-rose-500/45 p-2.5 space-y-2">
+                      <div className="text-[11px] font-bold text-rose-100 leading-snug">
+                        Clear all {tournamentEntries.length} tournament{' '}
+                        {tournamentEntries.length === 1 ? 'score' : 'scores'} across all rounds? This cannot be undone.
+                      </div>
+                      <div className="grid grid-cols-2 gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playUiClick();
+                            setConfirmResetLeaderboard(false);
+                          }}
+                          className="h-8 rounded-lg bg-slate-900 hover:bg-slate-800 border border-white/15 text-[11px] font-bold text-slate-200"
+                        >
+                          Cancel
+                        </button>
+                        <button
+                          type="button"
+                          disabled={busyAction === 'reset_leaderboard'}
+                          onClick={() => {
+                            playUiClick();
+                            setBusyAction('reset_leaderboard');
+                            void onResetTournamentLeaderboard()
+                              .then(() => {
+                                setConfirmResetLeaderboard(false);
+                                flashNotice(
+                                  'Tournament Leaderboard cleared for official event'
+                                );
+                              })
+                              .finally(() => setBusyAction(null));
+                          }}
+                          className="h-8 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-[11px] font-extrabold uppercase text-white"
+                        >
+                          {busyAction === 'reset_leaderboard'
+                            ? 'Resetting...'
+                            : 'Confirm Reset'}
+                        </button>
+                      </div>
+                    </div>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        playUiClick();
+                        setConfirmResetLeaderboard(true);
+                      }}
+                      className="w-full h-9 rounded-xl bg-amber-500/10 hover:bg-rose-950/60 border border-amber-400/30 hover:border-rose-400/50 text-amber-200 hover:text-rose-200 text-xs font-bold flex items-center justify-center gap-1.5 transition-colors"
+                    >
+                      <Trophy className="w-3.5 h-3.5" />
+                      <span>
+                        Reset Tournament Leaderboard ({tournamentEntries.length})
+                      </span>
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
           </section>
 
@@ -2037,6 +2174,8 @@ export function DeveloperInsightsModal({
             )}
           </section>
         </div>
+          </>
+        )}
       </div>
     </div>
   );

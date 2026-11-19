@@ -26,6 +26,7 @@ import {
   useCampusGame,
   type CampusLocalIdentity,
 } from './hooks/useCampusGame';
+import { useWakeLock } from './hooks/useWakeLock';
 import {
   playErrorFeedback,
   playTaskSuccessFeedback,
@@ -47,7 +48,23 @@ import { PrintKitScreen } from './components/PrintKitScreen';
 import { QrScannerModal, type ScannerMode } from './components/QrScannerModal';
 import { MiniGameModal } from './components/MiniGameModal';
 import { PrintKitPasscodeModal } from './components/PrintKitPasscodeModal';
+import { SpectatorScreen } from './components/SpectatorScreen';
+import { LeaderboardModal } from './components/LeaderboardModal';
+import { SplashIntro, shouldPlaySplashIntro } from './components/SplashIntro';
 import campusBackdropImg from './assets/images/campus_command_backdrop_1795073096738.jpg';
+
+function isSpectatorRoute(): boolean {
+  if (typeof window === 'undefined') return false;
+  const path = window.location.pathname.replace(/\/+$/, '');
+  const mode = new URLSearchParams(window.location.search).get('mode');
+  return path === '/spectator' || mode === 'spectator';
+}
+
+function getSpectatorQueryRoom(): string | null {
+  if (typeof window === 'undefined') return null;
+  const r = new URLSearchParams(window.location.search).get('room');
+  return r && r.trim() ? normalizeRoomCode(r) : null;
+}
 
 const LS_KEYS = {
   NAME: 'cairl_name',
@@ -90,6 +107,100 @@ function readJsonFromStorage<T>(key: string): T | null {
 }
 
 export default function App() {
+  const [isSpectatorMode, setIsSpectatorMode] = useState<boolean>(() =>
+    isSpectatorRoute()
+  );
+  const [spectatorRoomCode, setSpectatorRoomCode] = useState<string>(() => {
+    const queryRoom = getSpectatorQueryRoom();
+    if (queryRoom) return queryRoom;
+    try {
+      const saved = localStorage.getItem(LS_KEYS.ROOM_CODE);
+      return saved ? normalizeRoomCode(saved) : 'SVCE';
+    } catch {
+      return 'SVCE';
+    }
+  });
+  const [showSpectatorLeaderboard, setShowSpectatorLeaderboard] =
+    useState(false);
+
+  useEffect(() => {
+    const onPopState = () => {
+      const spectator = isSpectatorRoute();
+      setIsSpectatorMode(spectator);
+      if (spectator) {
+        const queryRoom = getSpectatorQueryRoom();
+        if (queryRoom) setSpectatorRoomCode(queryRoom);
+      }
+    };
+    window.addEventListener('popstate', onPopState);
+    return () => window.removeEventListener('popstate', onPopState);
+  }, []);
+
+  const handleOpenSpectatorRoot = useCallback((targetRoomCode: string) => {
+    const cleanCode = normalizeRoomCode(targetRoomCode || 'SVCE');
+    setSpectatorRoomCode(cleanCode);
+    setIsSpectatorMode(true);
+    try {
+      window.history.pushState(
+        {},
+        '',
+        `/spectator?room=${encodeURIComponent(cleanCode)}`
+      );
+    } catch {
+      // ignore history errors
+    }
+  }, []);
+
+  const handleExitSpectatorRoot = useCallback(() => {
+    setShowSpectatorLeaderboard(false);
+    setIsSpectatorMode(false);
+    try {
+      window.history.pushState({}, '', '/');
+    } catch {
+      // ignore history errors
+    }
+  }, []);
+
+  const [showSplashIntro, setShowSplashIntro] = useState<boolean>(() =>
+    shouldPlaySplashIntro()
+  );
+
+  // STRICTLY SPOILER-FREE ISOLATION:
+  // On /spectator or ?mode=spectator, never mount MainCampusApp or useCampusGame(),
+  // guaranteeing zero queries or Realtime subscriptions to private_roles.
+  if (isSpectatorMode) {
+    return (
+      <>
+        <SpectatorScreen
+          initialRoomCode={spectatorRoomCode}
+          onExitSpectator={handleExitSpectatorRoot}
+          onOpenFullLeaderboard={() => setShowSpectatorLeaderboard(true)}
+        />
+        <LeaderboardModal
+          isOpen={showSpectatorLeaderboard}
+          onClose={() => setShowSpectatorLeaderboard(false)}
+          currentPlayerName={null}
+          currentBadgeId={null}
+        />
+      </>
+    );
+  }
+
+  return (
+    <>
+      <MainCampusApp onOpenSpectator={handleOpenSpectatorRoot} />
+      {showSplashIntro && (
+        <SplashIntro onComplete={() => setShowSplashIntro(false)} />
+      )}
+    </>
+  );
+}
+
+function MainCampusApp({
+  onOpenSpectator,
+}: {
+  onOpenSpectator: (roomCode: string) => void;
+}) {
   const hasDebugQuery = useMemo(
     () =>
       typeof window !== 'undefined' &&
@@ -153,9 +264,17 @@ export default function App() {
     castVote,
     finalizeMeeting,
     dismissEjection,
-    resetRoom,
+    resetRoomForRematch,
     leaveRoom,
+    broadcastCampusMap,
+    awardCurrentMatchTournamentPoints,
+    resetTournamentScores,
   } = useCampusGame();
+
+  // Keep phone display awake automatically while a match or meeting is active
+  const isMatchActiveForWakeLock =
+    room?.status === 'PLAYING' || room?.status === 'MEETING';
+  const { isActive: isWakeLockActive } = useWakeLock(isMatchActiveForWakeLock);
 
   const campusStations = useCampusStations();
 
@@ -205,6 +324,7 @@ export default function App() {
   const [fakeCompletedIds, setFakeCompletedIds] = useState<string[]>([]);
   const [showPasscodeModal, setShowPasscodeModal] = useState(false);
   const [showPrintPasscodeModal, setShowPrintPasscodeModal] = useState(false);
+  const [showLeaderboardModal, setShowLeaderboardModal] = useState(false);
   const [unlockedPrintRoomCode, setUnlockedPrintRoomCode] = useState<string | null>(
     () => {
       try {
@@ -216,7 +336,7 @@ export default function App() {
   );
   const [showInsightsModal, setShowInsightsModal] = useState(false);
   const [insightsInitialTab, setInsightsInitialTab] = useState<
-    'lobby' | 'rooms' | 'analytics' | 'inbox'
+    'lobby' | 'rooms' | 'map' | 'analytics' | 'inbox'
   >('lobby');
   const [povBadgeId, setPovBadgeId] = useState<string | null>(null);
   const [joinError, setJoinError] = useState<string | null>(null);
@@ -450,6 +570,50 @@ export default function App() {
     });
   }, [rosterNotification, showToast]);
 
+  // Notify remaining players live when Host role transfers or auto-reassigns on Host exit
+  const prevHostSnapshotRef = useRef<{ roomCode: string; hostBadgeId: string | null }>({
+    roomCode: '',
+    hostBadgeId: null,
+  });
+  useEffect(() => {
+    const currentRoomCode = room?.room_code || '';
+    const currentHost = room?.host_badge_id || null;
+    if (!identity || !currentRoomCode) {
+      prevHostSnapshotRef.current = { roomCode: '', hostBadgeId: null };
+      return;
+    }
+    const prev = prevHostSnapshotRef.current;
+    if (
+      prev.roomCode === currentRoomCode &&
+      prev.hostBadgeId &&
+      currentHost &&
+      prev.hostBadgeId !== currentHost
+    ) {
+      if (currentHost === identity.badgeId) {
+        playTaskSuccessFeedback();
+        showToast('👑 You are now the Room Host! Host controls unlocked.', {
+          variant: 'success',
+          source: 'HOST_TRANSFER',
+          durationMs: 16_000,
+        });
+      } else {
+        const hostRow = publicPlayers.find((p) => p.badge_id === currentHost);
+        const hostLabel = hostRow
+          ? `${hostRow.name} (#${badgeIdToNumber(hostRow.badge_id)})`
+          : `Badge #${badgeIdToNumber(currentHost)}`;
+        showToast(`👑 ${hostLabel} is now the Room Host.`, {
+          variant: 'info',
+          source: 'HOST_TRANSFER',
+          durationMs: 14_000,
+        });
+      }
+    }
+    prevHostSnapshotRef.current = {
+      roomCode: currentRoomCode,
+      hostBadgeId: currentHost,
+    };
+  }, [identity, room?.room_code, room?.host_badge_id, publicPlayers, showToast]);
+
   // Keep Dev roles hydrated while Developer Mode is active so POV switching & analytics stay live
   useEffect(() => {
     if (isDebugMode && activeRoomCode) {
@@ -468,6 +632,54 @@ export default function App() {
     window.addEventListener('popstate', onPopState);
     return () => window.removeEventListener('popstate', onPopState);
   }, [screenOverride]);
+
+  const handleOpenSpectator = useCallback(() => {
+    const targetCode = normalizeRoomCode(
+      room?.room_code || identity?.roomCode || roomCode || 'SVCE'
+    );
+    onOpenSpectator(targetCode);
+  }, [room?.room_code, identity?.roomCode, roomCode, onOpenSpectator]);
+
+  // Automatically award tournament points once when a match transitions to ENDED (Host or Dev Panel)
+  const prevEndedScoreTriggerRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (room?.status !== 'ENDED' || !room.winner) {
+      prevEndedScoreTriggerRef.current = null;
+      return;
+    }
+
+    const myBadge = identity?.badgeId ? normalizeBadgeId(identity.badgeId) : null;
+    const isHost = Boolean(
+      room.host_badge_id &&
+        myBadge &&
+        normalizeBadgeId(room.host_badge_id) === myBadge
+    );
+    if (!isHost && !isDebugMode) return;
+
+    const triggerKey = `${room.room_code}_${room.status}_${room.winner}`;
+    if (prevEndedScoreTriggerRef.current === triggerKey) return;
+    prevEndedScoreTriggerRef.current = triggerKey;
+
+    void awardCurrentMatchTournamentPoints({
+      isDeveloperOverride: isDebugMode,
+    }).then((res) => {
+      if (res && res.ok && !res.alreadyScored && res.updatedCount > 0) {
+        showToast(
+          `🏆 Tournament points awarded to ${res.updatedCount} operatives!`,
+          { variant: 'success', source: 'TOURNAMENT', durationMs: 14_000 }
+        );
+      }
+    });
+  }, [
+    room?.status,
+    room?.winner,
+    room?.room_code,
+    room?.host_badge_id,
+    identity?.badgeId,
+    isDebugMode,
+    awardCurrentMatchTournamentPoints,
+    showToast,
+  ]);
 
   // Adapt Supabase rows to UI Player[] model (keeping private roles isolated; Dev Mode can inspect all roles for POV)
   const uiPlayers: Player[] = useMemo(() => {
@@ -570,17 +782,30 @@ export default function App() {
     };
   }, [activePovPlayer, effectiveRole]);
 
-  // Reset fake checklist when returning to Lobby or starting a fresh match; close overlays on Meeting/End
+  // Reset fake checklist & ghost/status overrides when returning to Lobby or starting a fresh match; close overlays on Meeting/End
   const prevRoomStatusRef = useRef<string | null>(null);
   useEffect(() => {
     const status = room?.status ?? null;
+    const prev = prevRoomStatusRef.current;
     if (
       status === 'LOBBY' ||
-      (status === 'PLAYING' &&
-        (prevRoomStatusRef.current === 'LOBBY' ||
-          prevRoomStatusRef.current === 'ENDED'))
+      (status === 'PLAYING' && (prev === 'LOBBY' || prev === 'ENDED'))
     ) {
       setFakeCompletedIds([]);
+    }
+    if (status === 'LOBBY' && prev && prev !== 'LOBBY') {
+      setStatusOverride(null);
+      setRoleOverride(null);
+      if (screenOverride === 'gameplay' || screenOverride === 'meeting') {
+        setScreenOverride(null);
+      }
+      setGhostModeActive(false);
+      if (prev === 'ENDED') {
+        showToast(
+          '🔄 Rematch ready! Returned to Waiting Lobby with your squad.',
+          { variant: 'success', source: 'REMATCH', durationMs: 10_000 }
+        );
+      }
     }
     if (status === 'MEETING' || status === 'ENDED') {
       setScannerMode(null);
@@ -588,7 +813,7 @@ export default function App() {
       setActiveMiniGameStation(null);
     }
     prevRoomStatusRef.current = status;
-  }, [room?.status]);
+  }, [room?.status, screenOverride, setGhostModeActive, showToast]);
 
   // Play atmospheric space-wind & subtle tactical BGM only on the Home Screen
   useEffect(() => {
@@ -1215,7 +1440,23 @@ export default function App() {
         onStartMatch={async (code, count) => {
           await startMatch(code, count, { isDeveloperOverride: true });
         }}
-        onResetMatch={resetRoom}
+        onResetMatch={async (targetCode) => {
+          const res = await resetRoomForRematch({
+            isDeveloperOverride: true,
+            roomCodeOverride: targetCode || activeRoomCode,
+          });
+          if (!res.ok && res.reason) {
+            playErrorFeedback();
+            showToast(res.reason, { variant: 'error', source: 'DEV_TOOLS' });
+          } else {
+            setFakeCompletedIds([]);
+            setRoleOverride(null);
+            setStatusOverride(null);
+            if (screenOverride === 'gameplay' || screenOverride === 'meeting') {
+              setScreenOverride(null);
+            }
+          }
+        }}
         onDevTriggerSabotage={(type) => handleDevTriggerSabotage(type)}
         onDevClearSabotage={async () => {
           await clearSabotage();
@@ -1266,6 +1507,22 @@ export default function App() {
         onTestStationMiniGame={(station) =>
           setActiveMiniGameStation(toTaskStation(station))
         }
+        onSyncCampusMap={broadcastCampusMap}
+        onOpenSpectator={handleOpenSpectator}
+        onResetTournamentLeaderboard={async () => {
+          const res = await resetTournamentScores();
+          if (res.error) {
+            showToast(
+              `Local leaderboard cleared (Supabase note: ${res.error})`,
+              { variant: 'warning', source: 'TOURNAMENT' }
+            );
+          } else {
+            showToast('Tournament Leaderboard reset to 0 scores.', {
+              variant: 'success',
+              source: 'TOURNAMENT',
+            });
+          }
+        }}
         onClearEvents={clearInsightEvents}
         onLockDevMode={handleLockDevMode}
         onClose={() => setShowInsightsModal(false)}
@@ -1356,6 +1613,15 @@ export default function App() {
         })}
       </div>
     ) : null;
+
+  const leaderboardModalNode = (
+    <LeaderboardModal
+      isOpen={showLeaderboardModal}
+      onClose={() => setShowLeaderboardModal(false)}
+      currentPlayerName={identity?.name || name || null}
+      currentBadgeId={identity?.badgeId || (badgeNumber ? `P${badgeNumber}` : null)}
+    />
+  );
 
   if (activeScreen === 'print') {
     if (!unlockedPrintRoomCode) {
@@ -1464,6 +1730,7 @@ export default function App() {
           connectionStatus={topBarConnectionStatus}
           reconnectAttempt={reconnectAttempt}
           wsLatencyMs={realtimeLatencyMs}
+          wakeLockActive={isWakeLockActive}
           onSelectPreset={(preset) => void handleSelectDevPreset(preset)}
           onSelectPov={handleSelectPov}
           onClearOverrides={handleReturnToLiveMatch}
@@ -1480,6 +1747,10 @@ export default function App() {
           onRequestUnlock={() => setShowPasscodeModal(true)}
           onOpenInsights={() => {
             setInsightsInitialTab('lobby');
+            setShowInsightsModal(true);
+          }}
+          onOpenMapDesigner={() => {
+            setInsightsInitialTab('map');
             setShowInsightsModal(true);
           }}
           onOpenInbox={() => {
@@ -1512,6 +1783,8 @@ export default function App() {
             onJoinLobby={() => void handleJoinLobby(false)}
             onJoinLocalFallback={() => void handleJoinLobby(true)}
             onOpenPrintKit={handleOpenPrintKitRequest}
+            onOpenLeaderboard={() => setShowLeaderboardModal(true)}
+            onOpenSpectator={handleOpenSpectator}
           />
         )}
 
@@ -1559,6 +1832,15 @@ export default function App() {
             onExitPov={() => handleSelectPov(null)}
             winner={uiWinner}
             winReason={uiWinReason}
+            hostBadgeId={room?.host_badge_id ?? null}
+            isHost={Boolean(
+              room?.host_badge_id &&
+                (activePovPlayer?.id || identity?.badgeId) &&
+                normalizeBadgeId(room.host_badge_id) ===
+                  normalizeBadgeId(
+                    activePovPlayer?.id || identity?.badgeId || ''
+                  )
+            )}
             onScanStation={(preselectedStationId) => {
               playUiClick();
               setTargetStationId(preselectedStationId || null);
@@ -1655,15 +1937,28 @@ export default function App() {
               setStatusOverride('ghost');
               setGhostModeActive(true);
             }}
-            onResetMatch={() => {
+            onResetMatch={async () => {
               playUiClick();
+              const res = await resetRoomForRematch({
+                isDeveloperOverride: false,
+                roomCodeOverride: room?.room_code || identity?.roomCode,
+              });
+              if (!res.ok) {
+                playErrorFeedback();
+                showToast(
+                  res.reason ||
+                    'Only the designated Room Host can start a rematch.',
+                  { variant: 'error', source: 'REMATCH' }
+                );
+                return;
+              }
               setFakeCompletedIds([]);
               setScreenOverride(null);
               setRoleOverride(null);
               setStatusOverride(null);
-              void resetRoom();
             }}
             onExitMatch={handleExitMatchOrLobby}
+            onOpenLeaderboard={() => setShowLeaderboardModal(true)}
           />
         )}
 
@@ -1795,6 +2090,9 @@ export default function App() {
           onClose={() => setShowPrintPasscodeModal(false)}
         />
       )}
+
+      {/* Campus Tournament Leaderboard Modal */}
+      {leaderboardModalNode}
 
       {/* Developer Insights & Laptop Studio Drawer */}
       {insightsModalNode}
