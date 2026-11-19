@@ -25,6 +25,7 @@ import {
 interface MiniGameModalProps {
   station: TaskStation;
   isFakeTask: boolean;
+  onTaskCompleteHaptic?: () => void;
   onComplete: (stationId: string) => void;
   onClose: () => void;
 }
@@ -112,6 +113,7 @@ function buildWavePath(
 export function MiniGameModal({
   station,
   isFakeTask,
+  onTaskCompleteHaptic,
   onComplete,
   onClose,
 }: MiniGameModalProps) {
@@ -155,14 +157,18 @@ export function MiniGameModal({
     if (completedRef.current) return;
     completedRef.current = true;
     setCompleted(true);
-    hapticPulse25();
+    if (onTaskCompleteHaptic) {
+      onTaskCompleteHaptic();
+    } else {
+      vibratePattern(65);
+    }
     playSuccessSound();
     successTimerRef.current = setTimeout(() => {
       if (isMountedRef.current) {
         onComplete(station.id);
       }
     }, 900);
-  }, [onComplete, station.id]);
+  }, [onComplete, onTaskCompleteHaptic, station.id]);
 
   // ── 1. Security Manifold (1-6) ──────────────────────────────────────────────
   const shuffledNumbers = useMemo(

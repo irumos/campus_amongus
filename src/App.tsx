@@ -106,6 +106,27 @@ function readJsonFromStorage<T>(key: string): T | null {
   }
 }
 
+const VIBRATION_PATTERNS = {
+  SABOTAGE_REACTOR: [140, 65, 140, 65, 180],
+  SABOTAGE_COMMS: [110, 60, 110],
+  BODY_REPORTED: [180, 75, 180, 75, 240],
+  EMERGENCY_MEETING: [120, 70, 150],
+  TASK_COMPLETE: [65],
+} as const;
+
+function triggerTactileVibration(pattern: readonly number[]): void {
+  try {
+    if (
+      typeof navigator !== 'undefined' &&
+      typeof navigator.vibrate === 'function'
+    ) {
+      navigator.vibrate([...pattern]);
+    }
+  } catch {
+    // Silently ignore unsupported or restricted vibration environments
+  }
+}
+
 export default function App() {
   const [isSpectatorMode, setIsSpectatorMode] = useState<boolean>(() =>
     isSpectatorRoute()
@@ -782,11 +803,14 @@ function MainCampusApp({
     };
   }, [activePovPlayer, effectiveRole]);
 
-  // Reset fake checklist & ghost/status overrides when returning to Lobby or starting a fresh match; close overlays on Meeting/End
+  // Reset fake checklist & ghost/status overrides when returning to Lobby or starting a fresh match; close overlays & vibrate on Meeting/Body Report
   const prevRoomStatusRef = useRef<string | null>(null);
+  const prevMeetingBodyRef = useRef<string | null>(null);
   useEffect(() => {
     const status = room?.status ?? null;
     const prev = prevRoomStatusRef.current;
+    const currentBodyBadge = room?.meeting_body_badge_id ?? null;
+
     if (
       status === 'LOBBY' ||
       (status === 'PLAYING' && (prev === 'LOBBY' || prev === 'ENDED'))
@@ -807,13 +831,73 @@ function MainCampusApp({
         );
       }
     }
+    if (status === 'MEETING') {
+      const enteredMeeting = prev !== null && prev !== 'MEETING';
+      const bodyNewlyReported =
+        Boolean(currentBodyBadge) &&
+        currentBodyBadge !== prevMeetingBodyRef.current;
+
+      if (bodyNewlyReported) {
+        triggerTactileVibration(VIBRATION_PATTERNS.BODY_REPORTED);
+      } else if (enteredMeeting) {
+        triggerTactileVibration(VIBRATION_PATTERNS.EMERGENCY_MEETING);
+      }
+    }
     if (status === 'MEETING' || status === 'ENDED') {
       setScannerMode(null);
       setTargetStationId(null);
       setActiveMiniGameStation(null);
     }
     prevRoomStatusRef.current = status;
-  }, [room?.status, screenOverride, setGhostModeActive, showToast]);
+    prevMeetingBodyRef.current = status === 'MEETING' ? currentBodyBadge : null;
+  }, [
+    room?.status,
+    room?.meeting_body_badge_id,
+    screenOverride,
+    setGhostModeActive,
+    showToast,
+  ]);
+
+  // Tactile vibration alert when a Sabotage (REACTOR / COMMS) starts
+  const prevSabotageEventRef = useRef<{
+    initialized: boolean;
+    roomCode: string | null;
+    key: string | null;
+  }>({ initialized: false, roomCode: null, key: null });
+
+  useEffect(() => {
+    const currentRoomCode = room?.room_code ?? null;
+    const sabotageType = room?.active_sabotage ?? null;
+    const currentKey = sabotageType
+      ? `${currentRoomCode || ''}:${sabotageType}:${room?.sabotage_ends_at ?? ''}`
+      : null;
+
+    const prev = prevSabotageEventRef.current;
+
+    // On initial room hydration or room switch, record current baseline without false buzz
+    if (!prev.initialized || prev.roomCode !== currentRoomCode) {
+      prevSabotageEventRef.current = {
+        initialized: Boolean(currentRoomCode),
+        roomCode: currentRoomCode,
+        key: currentKey,
+      };
+      return;
+    }
+
+    if (currentKey && currentKey !== prev.key) {
+      triggerTactileVibration(
+        sabotageType === 'REACTOR'
+          ? VIBRATION_PATTERNS.SABOTAGE_REACTOR
+          : VIBRATION_PATTERNS.SABOTAGE_COMMS
+      );
+    }
+
+    prevSabotageEventRef.current = {
+      initialized: true,
+      roomCode: currentRoomCode,
+      key: currentKey,
+    };
+  }, [room?.room_code, room?.active_sabotage, room?.sabotage_ends_at]);
 
   // Play atmospheric space-wind & subtle tactical BGM only on the Home Screen
   useEffect(() => {
@@ -2069,6 +2153,9 @@ function MainCampusApp({
         <MiniGameModal
           station={activeMiniGameStation}
           isFakeTask={effectiveRole === 'impostor'}
+          onTaskCompleteHaptic={() =>
+            triggerTactileVibration(VIBRATION_PATTERNS.TASK_COMPLETE)
+          }
           onComplete={(stationId) => void handleCompleteMiniGame(stationId)}
           onClose={() => setActiveMiniGameStation(null)}
         />
