@@ -15,6 +15,7 @@ export interface RoomRow {
   meeting_ends_at: number | null;
   ejection_result: string | null;
   impostor_count: number;
+  host_badge_id: string | null;
   meeting_caller_badge_id: string | null;
   meeting_body_badge_id: string | null;
   print_passcode?: string | null;
@@ -412,6 +413,7 @@ CREATE TABLE IF NOT EXISTS public.rooms (
   meeting_ends_at BIGINT,
   ejection_result TEXT,
   impostor_count INTEGER NOT NULL DEFAULT 1,
+  host_badge_id TEXT,
   meeting_caller_badge_id TEXT,
   meeting_body_badge_id TEXT,
   print_passcode TEXT,
@@ -456,6 +458,7 @@ ALTER TABLE public.rooms
   ADD COLUMN IF NOT EXISTS meeting_ends_at BIGINT,
   ADD COLUMN IF NOT EXISTS ejection_result TEXT,
   ADD COLUMN IF NOT EXISTS impostor_count INTEGER NOT NULL DEFAULT 1,
+  ADD COLUMN IF NOT EXISTS host_badge_id TEXT,
   ADD COLUMN IF NOT EXISTS meeting_caller_badge_id TEXT,
   ADD COLUMN IF NOT EXISTS meeting_body_badge_id TEXT,
   ADD COLUMN IF NOT EXISTS print_passcode TEXT,

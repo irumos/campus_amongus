@@ -5,12 +5,20 @@ import {
   BarChart3,
   ChevronDown,
   ChevronUp,
+  Eye,
+  Inbox,
   Lock,
   Radio,
   Sparkles,
   Users,
 } from 'lucide-react';
-import type { PlayerRole, PlayerStatus, ScreenId } from '../shared/gameData';
+import {
+  getBadgeInfo,
+  type Player,
+  type PlayerRole,
+  type PlayerStatus,
+  type ScreenId,
+} from '../shared/gameData';
 import type { RealtimeConnectionStatus } from '../hooks/useCampusGame';
 import { playUiClick } from '../utils/feedback';
 
@@ -30,6 +38,9 @@ interface DevSwitcherBarProps {
   statusOverride: PlayerStatus | null;
   hasActiveOverride?: boolean;
   roomCode?: string;
+  players?: Player[];
+  povBadgeId?: string | null;
+  unreadInboxCount?: number;
   wsConnected?: boolean;
   connectionStatus?: RealtimeConnectionStatus;
   reconnectAttempt?: number;
@@ -37,11 +48,13 @@ interface DevSwitcherBarProps {
   isFloatingOnly?: boolean;
   isDebugMode?: boolean;
   onSelectPreset: (preset: DevPresetId) => void;
+  onSelectPov?: (badgeId: string | null) => void;
   onClearOverrides?: () => void;
   onTriggerSabotage: () => void;
   onSeedDemoPlayers: () => void;
   onRequestUnlock?: () => void;
   onOpenInsights?: () => void;
+  onOpenInbox?: () => void;
   onLockDevMode?: () => void;
 }
 
@@ -51,6 +64,9 @@ export function DevSwitcherBar({
   statusOverride,
   hasActiveOverride = false,
   roomCode = 'SVCE',
+  players = [],
+  povBadgeId = null,
+  unreadInboxCount = 0,
   wsConnected = false,
   connectionStatus,
   reconnectAttempt = 0,
@@ -59,11 +75,13 @@ export function DevSwitcherBar({
   isDebugMode = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === 'true',
   onSelectPreset,
+  onSelectPov,
   onClearOverrides,
   onTriggerSabotage,
   onSeedDemoPlayers,
   onRequestUnlock,
   onOpenInsights,
+  onOpenInbox,
   onLockDevMode,
 }: DevSwitcherBarProps) {
   const [open, setOpen] = useState(false);
@@ -204,6 +222,26 @@ export function DevSwitcherBar({
             </button>
           )}
 
+          {onOpenInbox && !isFloatingOnly && (
+            <button
+              type="button"
+              onClick={() => {
+                playUiClick();
+                setOpen(false);
+                onOpenInbox();
+              }}
+              title="Developer Room Error & Message Inbox"
+              className={`relative h-8 px-2.5 rounded-full backdrop-blur-xl border shadow-lg text-[10px] font-mono font-bold flex items-center gap-1 transition-all active:scale-95 whitespace-nowrap shrink-0 ${
+                unreadInboxCount > 0
+                  ? 'bg-rose-500/20 border-rose-400/60 text-rose-200 hover:bg-rose-500/30'
+                  : 'bg-slate-900/85 border-white/15 text-slate-300 hover:border-cyan-400/40'
+              }`}
+            >
+              <Inbox className="w-3 h-3" />
+              <span className="tabular-nums">{unreadInboxCount}</span>
+            </button>
+          )}
+
           {onOpenInsights && !isFloatingOnly && (
             <button
               type="button"
@@ -238,7 +276,7 @@ export function DevSwitcherBar({
           </button>
 
           {open && (
-            <div className="absolute right-0 top-10 w-72 max-w-[calc(100vw-1.5rem)] glass-card rounded-2xl p-3 space-y-2.5 z-50 border-cyan-400/25 shadow-2xl">
+            <div className="absolute right-0 top-10 w-72 max-w-[calc(100vw-1.5rem)] max-h-[80dvh] overflow-y-auto glass-card rounded-2xl p-3 space-y-2.5 z-50 border-cyan-400/25 shadow-2xl">
               <div className="flex items-center justify-between gap-2">
                 <span className="text-[10px] font-bold uppercase tracking-widest text-slate-400">
                   Switch Screen / Role
@@ -285,6 +323,63 @@ export function DevSwitcherBar({
                   </button>
                 ))}
               </div>
+
+              {/* Crewmate / Operative POV Switcher */}
+              {onSelectPov && players.length > 0 && (
+                <div className="pt-1.5 border-t border-white/10 space-y-1.5">
+                  <div className="flex items-center justify-between">
+                    <span className="text-[10px] font-bold uppercase tracking-widest text-amber-300 flex items-center gap-1">
+                      <Eye className="w-3 h-3" />
+                      <span>Observe Operative POV</span>
+                    </span>
+                    {povBadgeId && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playUiClick();
+                          onSelectPov(null);
+                          setOpen(false);
+                        }}
+                        className="text-[9px] font-mono font-bold text-emerald-300 hover:underline"
+                      >
+                        Reset POV
+                      </button>
+                    )}
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-1 max-h-32 overflow-y-auto pr-0.5">
+                    {players.map((p) => {
+                      const badge = getBadgeInfo(p.badgeNumber);
+                      const isActivePov = povBadgeId === p.id;
+                      return (
+                        <button
+                          key={p.id}
+                          type="button"
+                          onClick={() => {
+                            playUiClick();
+                            onSelectPov(isActivePov ? null : p.id);
+                            setOpen(false);
+                          }}
+                          className={`min-h-[34px] px-2 py-1 rounded-lg border text-left flex items-center gap-1.5 transition-all ${
+                            isActivePov
+                              ? 'bg-amber-500/25 border-amber-400 text-amber-100'
+                              : 'bg-slate-900/80 border-white/10 text-slate-200 hover:border-amber-400/40'
+                          }`}
+                        >
+                          <span
+                            className="w-2.5 h-2.5 rounded-full shrink-0"
+                            style={{ backgroundColor: badge.hex }}
+                          />
+                          <span className="text-[10px] font-mono font-bold shrink-0">
+                            #{p.badgeNumber}
+                          </span>
+                          <span className="text-[10px] truncate">{p.name}</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
 
               <div className="pt-1.5 border-t border-white/10 grid grid-cols-2 gap-1.5">
                 <button

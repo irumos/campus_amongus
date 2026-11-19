@@ -15,10 +15,13 @@ export interface CampusWristbandConfig {
   id: string;
   number: string;
   label: string;
+  callsign: string;
   colorName: string;
   colorHex: string;
   qrPayload: string;
 }
+
+export type CampusIdCardConfig = CampusWristbandConfig;
 
 export interface CampusTaskStationConfig {
   id: string;
@@ -31,39 +34,46 @@ export interface CampusTaskStationConfig {
   qrPayload: string;
 }
 
-const WRISTBAND_PALETTE: { colorName: string; colorHex: string }[] = [
-  { colorName: 'Electric Cyan', colorHex: '#06b6d4' },
-  { colorName: 'Cobalt Blue', colorHex: '#3b82f6' },
-  { colorName: 'Neon Emerald', colorHex: '#10b981' },
-  { colorName: 'High-Voltage Amber', colorHex: '#f59e0b' },
-  { colorName: 'Phantom Violet', colorHex: '#8b5cf6' },
-  { colorName: 'Coral Rose', colorHex: '#f43f5e' },
-  { colorName: 'Crimson Laser', colorHex: '#ef4444' },
-  { colorName: 'Acid Lime', colorHex: '#84cc16' },
-  { colorName: 'Solar Orange', colorHex: '#f97316' },
-  { colorName: 'Deep Indigo', colorHex: '#6366f1' },
-  { colorName: 'Cyber Teal', colorHex: '#14b8a6' },
-  { colorName: 'Hyper Pink', colorHex: '#ec4899' },
-  { colorName: 'Sky Pulse', colorHex: '#0ea5e9' },
-  { colorName: 'Fuchsia Glow', colorHex: '#d946ef' },
-  { colorName: 'Gold Volt', colorHex: '#eab308' },
-  { colorName: 'Mint Frost', colorHex: '#34d399' },
+const ID_CARD_PALETTE: {
+  colorName: string;
+  colorHex: string;
+  callsign: string;
+}[] = [
+  { colorName: 'Electric Cyan', colorHex: '#06b6d4', callsign: 'ALPHA' },
+  { colorName: 'Cobalt Blue', colorHex: '#3b82f6', callsign: 'BOLT' },
+  { colorName: 'Neon Emerald', colorHex: '#10b981', callsign: 'CORE' },
+  { colorName: 'High-Voltage Amber', colorHex: '#f59e0b', callsign: 'DELTA' },
+  { colorName: 'Phantom Violet', colorHex: '#8b5cf6', callsign: 'ECHO' },
+  { colorName: 'Coral Rose', colorHex: '#f43f5e', callsign: 'FLARE' },
+  { colorName: 'Crimson Laser', colorHex: '#ef4444', callsign: 'GRID' },
+  { colorName: 'Acid Lime', colorHex: '#84cc16', callsign: 'HALO' },
+  { colorName: 'Solar Orange', colorHex: '#f97316', callsign: 'ION' },
+  { colorName: 'Deep Indigo', colorHex: '#6366f1', callsign: 'JET' },
+  { colorName: 'Cyber Teal', colorHex: '#14b8a6', callsign: 'KITE' },
+  { colorName: 'Hyper Pink', colorHex: '#ec4899', callsign: 'LUNA' },
+  { colorName: 'Sky Pulse', colorHex: '#0ea5e9', callsign: 'MESH' },
+  { colorName: 'Fuchsia Glow', colorHex: '#d946ef', callsign: 'NOVA' },
+  { colorName: 'Gold Volt', colorHex: '#eab308', callsign: 'ORBIT' },
+  { colorName: 'Mint Frost', colorHex: '#34d399', callsign: 'PULSE' },
 ];
 
-export const WRISTBANDS: CampusWristbandConfig[] = WRISTBAND_PALETTE.map(
+export const WRISTBANDS: CampusWristbandConfig[] = ID_CARD_PALETTE.map(
   (palette, idx) => {
     const num = String(idx + 1).padStart(2, '0');
     const id = `P${num}`;
     return {
       id,
       number: num,
-      label: `Badge #${num}`,
+      label: `ID Card #${num}`,
+      callsign: palette.callsign,
       colorName: palette.colorName,
       colorHex: palette.colorHex,
-      qrPayload: `CAMPUS_AU:WRISTBAND:${id}`,
+      qrPayload: `CAMPUS_AU:IDCARD:${id}`,
     };
   }
 );
+
+export const ID_CARDS: CampusIdCardConfig[] = WRISTBANDS;
 
 export const TASK_STATIONS: CampusTaskStationConfig[] = [
   {

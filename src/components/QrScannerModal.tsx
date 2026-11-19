@@ -15,11 +15,16 @@ import {
   X,
   Zap,
 } from 'lucide-react';
-import { WRISTBANDS } from '../config/campusConfig';
+import { ID_CARDS } from '../config/campusConfig';
+import {
+  buildIdCardQrPayload,
+  buildStationQrPayload,
+} from '../config/matchQrStore';
 import { useCampusStations } from '../config/stationStore';
 import { parseQrPayload, type Player } from '../shared/gameData';
 import {
   playErrorFeedback,
+  playIdCardScanSound,
   playQrScanSuccess,
   playUiClick,
 } from '../utils/feedback';
@@ -30,6 +35,8 @@ interface QrScannerModalProps {
   mode: ScannerMode;
   players?: Player[];
   myPlayerId?: string;
+  activeRoomCode?: string;
+  expectedMatchToken?: string;
   assignedStationIds?: string[];
   completedStationIds?: string[];
   targetStationId?: string | null;
@@ -38,7 +45,9 @@ interface QrScannerModalProps {
   activeSabotageStationIds?: string[];
   isDebugMode?: boolean;
   onScanBadge?: (badgeNumber: string) => void;
+  onScanMeta?: (meta: { roomCode?: string; matchToken?: string }) => void;
   onScanStation?: (stationId: string) => void;
+  onScanError?: (message: string) => void;
   onClose: () => void;
 }
 
@@ -48,6 +57,8 @@ export function QrScannerModal({
   mode,
   players = [],
   myPlayerId,
+  activeRoomCode,
+  expectedMatchToken,
   assignedStationIds,
   completedStationIds = [],
   targetStationId = null,
@@ -57,7 +68,9 @@ export function QrScannerModal({
   isDebugMode = typeof window !== 'undefined' &&
     new URLSearchParams(window.location.search).get('debug') === 'true',
   onScanBadge,
+  onScanMeta,
   onScanStation,
+  onScanError,
   onClose,
 }: QrScannerModalProps) {
   const campusStations = useCampusStations();
@@ -84,7 +97,6 @@ export function QrScannerModal({
   const [cameraRestartNonce, setCameraRestartNonce] = useState(0);
   const [scanFeedback, setScanFeedback] = useState<string | null>(null);
   const [simDrawerOpen, setSimDrawerOpen] = useState(false);
-  const [manualBadgeOpen, setManualBadgeOpen] = useState(false);
 
   const stopAndClearCamera = useCallback(async () => {
     const instance = scannerRef.current;
@@ -114,30 +126,53 @@ export function QrScannerModal({
 
       const parsed = parseQrPayload(raw);
 
+      const rejectScan = (msg: string) => {
+        playErrorFeedback();
+        setScanFeedback(msg);
+        onScanError?.(msg);
+      };
+
+      const normalizedActiveRoom = activeRoomCode?.trim().toUpperCase();
+
       if (mode === 'wristband') {
         const upper = raw.toUpperCase();
-        const wristband =
+        const card =
           (parsed?.kind === 'badge'
-            ? WRISTBANDS.find((w) => w.number === parsed.badgeNumber)
+            ? ID_CARDS.find((w) => w.number === parsed.badgeNumber)
             : undefined) ||
-          WRISTBANDS.find(
+          ID_CARDS.find(
             (w) =>
               w.qrPayload.toUpperCase() === upper ||
               w.id.toUpperCase() === upper ||
               w.number === upper
           );
 
-        if (!wristband) {
-          playErrorFeedback();
-          setScanFeedback(
-            'Invalid QR. Scan a Wristband QR (CAMPUS_AU:WRISTBAND:P01–P16).'
-          );
+        if (!card) {
+          rejectScan('Invalid QR. Scan a Player ID Card QR (#01–#16).');
           return;
         }
         handledScanRef.current = true;
-        playQrScanSuccess();
+        playIdCardScanSound();
         await stopAndClearCamera();
-        onScanBadge?.(wristband.number);
+        if (parsed?.roomCode || parsed?.matchToken) {
+          onScanMeta?.({
+            roomCode: parsed.roomCode,
+            matchToken: parsed.matchToken,
+          });
+        }
+        onScanBadge?.(card.number);
+        return;
+      }
+
+      // Room validation for active match modes (station, eliminate, report)
+      if (
+        parsed?.roomCode &&
+        normalizedActiveRoom &&
+        parsed.roomCode.toUpperCase() !== normalizedActiveRoom
+      ) {
+        rejectScan(
+          `Wrong Room QR! This card belongs to room ${parsed.roomCode}, not ${normalizedActiveRoom}.`
+        );
         return;
       }
 
@@ -153,8 +188,7 @@ export function QrScannerModal({
           );
 
         if (!station) {
-          playErrorFeedback();
-          setScanFeedback('Invalid QR. Scan a Campus Station poster QR.');
+          rejectScan('Invalid QR. Scan a Campus Station poster QR.');
           return;
         }
         const isAssigned = effectiveAssignedStationIds.includes(station.id);
@@ -164,10 +198,7 @@ export function QrScannerModal({
           activeSabotageStationIds.includes(station.id);
 
         if (!isAssigned && !isSabotageTarget && !isFakeScanMode) {
-          playErrorFeedback();
-          setScanFeedback(
-            `${station.roomName} is not assigned to your mission.`
-          );
+          rejectScan(`${station.roomName} is not assigned to your mission.`);
           return;
         }
 
@@ -183,8 +214,7 @@ export function QrScannerModal({
           const partner = campusStations.find(
             (s) => s.id === station.relayPartnerId
           );
-          playErrorFeedback();
-          setScanFeedback(
+          rejectScan(
             `Relay Locked! Scan ${
               partner?.roomName || station.relayPartnerId
             } first to Download Campus Logs.`
@@ -201,73 +231,67 @@ export function QrScannerModal({
 
       if (mode === 'eliminate') {
         const upper = raw.toUpperCase();
-        const wristband =
+        const card =
           (parsed?.kind === 'badge'
-            ? WRISTBANDS.find((w) => w.number === parsed.badgeNumber)
+            ? ID_CARDS.find((w) => w.number === parsed.badgeNumber)
             : undefined) ||
-          WRISTBANDS.find((w) => w.qrPayload.toUpperCase() === upper);
+          ID_CARDS.find((w) => w.qrPayload.toUpperCase() === upper);
 
-        if (!wristband) {
-          playErrorFeedback();
-          setScanFeedback('Scan a player wristband QR to eliminate.');
+        if (!card) {
+          rejectScan('Scan a player ID Card QR to eliminate.');
           return;
         }
-        const target = players.find((p) => p.badgeNumber === wristband.number);
+        const target = players.find((p) => p.badgeNumber === card.number);
         if (!target) {
-          playErrorFeedback();
-          setScanFeedback(`No player registered on ${wristband.label}.`);
+          rejectScan(`No player registered on ${card.label}.`);
           return;
         }
         if (target.id === myPlayerId) {
-          playErrorFeedback();
-          setScanFeedback('Cannot eliminate yourself.');
+          rejectScan('Cannot eliminate yourself.');
           return;
         }
         if (target.status !== 'alive') {
-          playErrorFeedback();
-          setScanFeedback(`${target.name} is already eliminated.`);
+          rejectScan(`${target.name} is already eliminated.`);
           return;
         }
         if (target.role === 'impostor') {
-          playErrorFeedback();
-          setScanFeedback(`${target.name} is a fellow Impostor!`);
+          rejectScan(`${target.name} is a fellow Impostor!`);
           return;
         }
 
         handledScanRef.current = true;
-        playQrScanSuccess();
+        playIdCardScanSound();
         await stopAndClearCamera();
-        onScanBadge?.(wristband.number);
+        onScanBadge?.(card.number);
         return;
       }
 
       if (mode === 'report') {
         const upper = raw.toUpperCase();
-        const wristband =
+        const card =
           (parsed?.kind === 'badge'
-            ? WRISTBANDS.find((w) => w.number === parsed.badgeNumber)
+            ? ID_CARDS.find((w) => w.number === parsed.badgeNumber)
             : undefined) ||
-          WRISTBANDS.find((w) => w.qrPayload.toUpperCase() === upper);
+          ID_CARDS.find((w) => w.qrPayload.toUpperCase() === upper);
 
-        if (!wristband) {
-          playErrorFeedback();
-          setScanFeedback('Scan an eliminated player wristband QR to report.');
+        if (!card) {
+          rejectScan('Scan an eliminated player ID Card QR to report.');
           return;
         }
-        const target = players.find((p) => p.badgeNumber === wristband.number);
+        const target = players.find((p) => p.badgeNumber === card.number);
         if (target && target.status !== 'eliminated') {
-          playErrorFeedback();
-          setScanFeedback(`${target.name} (${wristband.label}) is still alive!`);
+          rejectScan(`${target.name} (${card.label}) is still alive!`);
           return;
         }
 
         handledScanRef.current = true;
-        playQrScanSuccess();
+        playIdCardScanSound();
         await stopAndClearCamera();
-        onScanBadge?.(wristband.number);
+        onScanBadge?.(card.number);
       }
     },
     [
+      activeRoomCode,
       activeSabotageStationId,
       activeSabotageStationIds,
       campusStations,
@@ -277,6 +301,8 @@ export function QrScannerModal({
       mode,
       myPlayerId,
       onScanBadge,
+      onScanError,
+      onScanMeta,
       onScanStation,
       players,
       stopAndClearCamera,
@@ -450,11 +476,21 @@ export function QrScannerModal({
   };
 
   const titleByMode: Record<ScannerMode, string> = {
-    wristband: 'SCAN WRISTBAND QR',
+    wristband: 'SCAN ID CARD QR',
     station: 'SCAN ROOM / TASK QR',
-    eliminate: 'ELIMINATE TARGET QR',
-    report: 'REPORT BODY QR',
+    eliminate: 'ELIMINATE ID CARD QR',
+    report: 'REPORT BODY ID CARD',
   };
+
+  const simCardPayload = (badgeId: string) =>
+    activeRoomCode && expectedMatchToken
+      ? buildIdCardQrPayload(activeRoomCode, expectedMatchToken, badgeId)
+      : `CAMPUS_AU:IDCARD:${badgeId}`;
+
+  const simStationPayload = (stationId: string) =>
+    activeRoomCode && expectedMatchToken
+      ? buildStationQrPayload(activeRoomCode, expectedMatchToken, stationId)
+      : `CAMPUS_AU:STATION:${stationId}`;
 
   const livingCrewTargets = players.filter(
     (p) => p.id !== myPlayerId && p.status === 'alive' && p.role === 'crewmate'
@@ -543,51 +579,6 @@ export function QrScannerModal({
           </div>
         )}
 
-        {/* Manual Wristband Picker on JoinScreen ("Camera QR or tap badge #01–#16") */}
-        {mode === 'wristband' && !isDebugMode && (
-          <div className="border-t border-white/10 pt-2.5">
-            <button
-              type="button"
-              onClick={() => {
-                playUiClick();
-                setManualBadgeOpen((v) => !v);
-              }}
-              className="w-full h-10 px-3 rounded-xl bg-slate-950/75 hover:bg-slate-900 border border-white/10 flex items-center justify-between text-xs font-bold text-slate-200 transition-colors"
-            >
-              <span>Or Tap Wristband Badge #01–#16 Manually</span>
-              {manualBadgeOpen ? (
-                <ChevronUp className="w-4 h-4 text-slate-400" />
-              ) : (
-                <ChevronDown className="w-4 h-4 text-slate-400" />
-              )}
-            </button>
-
-            {manualBadgeOpen && (
-              <div className="pt-2.5 grid grid-cols-4 gap-1.5">
-                {WRISTBANDS.map((wb) => (
-                  <button
-                    key={wb.id}
-                    type="button"
-                    onClick={() => void handleDecodedPayload(wb.qrPayload)}
-                    className="min-h-[44px] px-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 flex items-center justify-center gap-1.5 transition-all active:scale-95"
-                  >
-                    <span
-                      className="w-3 h-3 rounded-full border border-white/30 shrink-0"
-                      style={{
-                        backgroundColor: wb.colorHex,
-                        boxShadow: `0 0 8px ${wb.colorHex}66`,
-                      }}
-                    />
-                    <span className="text-[10px] font-mono font-bold text-white tabular-nums">
-                      {wb.id}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
         {/* Collapsible Dev Quick-Simulate Scan Drawer (Strictly ?debug=true / Dev Unlocked) */}
         {isDebugMode && (
           <div className="border-t border-white/10 pt-2.5">
@@ -614,22 +605,24 @@ export function QrScannerModal({
               <div className="pt-2.5 space-y-2">
                 {mode === 'wristband' && (
                   <div className="grid grid-cols-4 gap-1.5">
-                    {WRISTBANDS.map((wb) => (
+                    {ID_CARDS.map((card) => (
                       <button
-                        key={wb.id}
+                        key={card.id}
                         type="button"
-                        onClick={() => void handleDecodedPayload(wb.qrPayload)}
+                        onClick={() =>
+                          void handleDecodedPayload(simCardPayload(card.id))
+                        }
                         className="h-10 px-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 flex items-center justify-center gap-1.5 transition-all active:scale-95"
                       >
                         <span
                           className="w-3 h-3 rounded-full border border-white/30 shrink-0"
                           style={{
-                            backgroundColor: wb.colorHex,
-                            boxShadow: `0 0 8px ${wb.colorHex}66`,
+                            backgroundColor: card.colorHex,
+                            boxShadow: `0 0 8px ${card.colorHex}66`,
                           }}
                         />
                         <span className="text-[10px] font-mono font-bold text-white tabular-nums">
-                          {wb.id}
+                          {card.id}
                         </span>
                       </button>
                     ))}
@@ -647,7 +640,9 @@ export function QrScannerModal({
                           key={station.id}
                           type="button"
                           onClick={() =>
-                            void handleDecodedPayload(station.qrPayload)
+                            void handleDecodedPayload(
+                              simStationPayload(station.id)
+                            )
                           }
                           className={`min-h-[48px] px-2.5 py-1.5 rounded-xl bg-slate-950/80 hover:bg-slate-800 border border-white/10 flex items-center justify-between gap-2 text-left active:scale-95 transition-all ${
                             isLastOdd ? 'col-span-2' : ''
@@ -685,7 +680,7 @@ export function QrScannerModal({
                   <div className="grid grid-cols-2 gap-1.5">
                     {livingCrewTargets.length > 0 ? (
                       livingCrewTargets.map((target) => {
-                        const wb = WRISTBANDS.find(
+                        const card = ID_CARDS.find(
                           (w) => w.number === target.badgeNumber
                         );
                         return (
@@ -693,19 +688,20 @@ export function QrScannerModal({
                             key={target.id}
                             type="button"
                             onClick={() =>
-                              wb && void handleDecodedPayload(wb.qrPayload)
+                              card &&
+                              void handleDecodedPayload(simCardPayload(card.id))
                             }
                             className="h-12 px-2.5 rounded-xl bg-rose-950/60 hover:bg-rose-900/70 border border-rose-500/40 flex items-center gap-2 text-left active:scale-95 transition-all"
                           >
                             <span
                               className="w-3.5 h-3.5 rounded-full shrink-0"
                               style={{
-                                backgroundColor: wb?.colorHex || '#f43f5e',
+                                backgroundColor: card?.colorHex || '#f43f5e',
                               }}
                             />
                             <div className="min-w-0">
                               <div className="text-[10px] font-mono font-bold text-white tabular-nums">
-                                {wb?.id || `#${target.badgeNumber}`}
+                                {card?.id || `#${target.badgeNumber}`}
                               </div>
                               <div className="text-xs text-rose-200 truncate">
                                 {target.name}
@@ -728,7 +724,7 @@ export function QrScannerModal({
                     {deadTargets.length > 0 ? (
                       <div className="grid grid-cols-2 gap-1.5">
                         {deadTargets.map((target) => {
-                          const wb = WRISTBANDS.find(
+                          const card = ID_CARDS.find(
                             (w) => w.number === target.badgeNumber
                           );
                           return (
@@ -736,7 +732,10 @@ export function QrScannerModal({
                               key={target.id}
                               type="button"
                               onClick={() =>
-                                wb && void handleDecodedPayload(wb.qrPayload)
+                                card &&
+                                void handleDecodedPayload(
+                                  simCardPayload(card.id)
+                                )
                               }
                               className="h-12 px-2.5 rounded-xl bg-violet-950/70 hover:bg-violet-900/70 border border-violet-400/50 flex items-center gap-2 text-left"
                             >
@@ -756,14 +755,16 @@ export function QrScannerModal({
                       <button
                         type="button"
                         onClick={() => {
-                          const fallback = WRISTBANDS[3];
+                          const fallback = ID_CARDS[3];
                           if (fallback) {
-                            void handleDecodedPayload(fallback.qrPayload);
+                            void handleDecodedPayload(
+                              simCardPayload(fallback.id)
+                            );
                           }
                         }}
                         className="w-full h-12 rounded-xl bg-rose-600/85 hover:bg-rose-500 text-white font-display font-extrabold text-xs tracking-wide uppercase"
                       >
-                        Simulate Report Body (CAMPUS_AU:WRISTBAND:P04)
+                        Simulate Report Body (ID Card #04)
                       </button>
                     )}
                   </div>

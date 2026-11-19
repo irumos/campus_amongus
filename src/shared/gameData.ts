@@ -28,10 +28,13 @@ export interface WristbandBadge {
   id: string;
   number: string;
   label: string;
+  callsign: string;
   colorName: string;
   hex: string;
   qrValue: string;
 }
+
+export type IdCardBadge = WristbandBadge;
 
 export interface TaskStation {
   id: string;
@@ -136,10 +139,13 @@ export const WRISTBAND_BADGES: WristbandBadge[] = WRISTBANDS.map((w) => ({
   id: w.id,
   number: w.number,
   label: w.label,
+  callsign: w.callsign,
   colorName: w.colorName,
   hex: w.colorHex,
   qrValue: w.qrPayload,
 }));
+
+export const ID_CARD_BADGES: IdCardBadge[] = WRISTBAND_BADGES;
 
 export const TASK_STATIONS: TaskStation[] = CAMPUS_TASK_STATIONS.map(toTaskStation);
 
@@ -154,36 +160,98 @@ export function getStationInfo(stationId: string): TaskStation | undefined {
   return active.find((s) => s.id === stationId);
 }
 
-export function parseQrPayload(
-  raw: string
-): { kind: 'badge'; badgeNumber: string } | { kind: 'station'; stationId: string } | null {
+export type ParsedQrPayload =
+  | {
+      kind: 'badge';
+      badgeNumber: string;
+      roomCode?: string;
+      matchToken?: string;
+    }
+  | {
+      kind: 'station';
+      stationId: string;
+      roomCode?: string;
+      matchToken?: string;
+    };
+
+export function parseQrPayload(raw: string): ParsedQrPayload | null {
   const trimmed = raw.trim();
+  const upper = trimmed.toUpperCase();
   const activeStations = getActiveStations();
 
-  // Primary CAMPUS_AU payloads from campusConfig / stationStore
-  if (trimmed.startsWith('CAMPUS_AU:WRISTBAND:')) {
-    const code = trimmed.replace('CAMPUS_AU:WRISTBAND:', '').toUpperCase();
-    const matched = WRISTBAND_BADGES.find((b) => b.id === code);
-    if (matched) {
-      return { kind: 'badge', badgeNumber: matched.number };
+  // Room + Game unique ID Card QR: CAMPUS_AU:IDCARD:<ROOM>:<TOKEN>:P01
+  // Also supports unscoped CAMPUS_AU:IDCARD:P01
+  if (upper.startsWith('CAMPUS_AU:IDCARD:')) {
+    const parts = upper.split(':');
+    if (parts.length >= 5) {
+      const roomCode = parts[2];
+      const matchToken = parts[3];
+      const code = parts[4];
+      const matched = WRISTBAND_BADGES.find(
+        (b) => b.id === code || b.number === code.padStart(2, '0')
+      );
+      if (matched) {
+        return {
+          kind: 'badge',
+          badgeNumber: matched.number,
+          roomCode,
+          matchToken,
+        };
+      }
+    } else if (parts.length === 3) {
+      const code = parts[2];
+      const matched = WRISTBAND_BADGES.find(
+        (b) => b.id === code || b.number === code.padStart(2, '0')
+      );
+      if (matched) {
+        return { kind: 'badge', badgeNumber: matched.number };
+      }
     }
   }
-  if (trimmed.startsWith('CAMPUS_AU:STATION:')) {
-    const stationId = trimmed.replace('CAMPUS_AU:STATION:', '').toUpperCase();
-    if (activeStations.some((s) => s.id === stationId)) {
-      return { kind: 'station', stationId };
+
+  // Legacy CAMPUS_AU:WRISTBAND:P01 (or scoped CAMPUS_AU:WRISTBAND:<ROOM>:<TOKEN>:P01)
+  if (upper.startsWith('CAMPUS_AU:WRISTBAND:')) {
+    const parts = upper.split(':');
+    const code = parts[parts.length - 1];
+    const matched = WRISTBAND_BADGES.find((b) => b.id === code);
+    if (matched) {
+      return {
+        kind: 'badge',
+        badgeNumber: matched.number,
+        roomCode: parts.length >= 5 ? parts[2] : undefined,
+        matchToken: parts.length >= 5 ? parts[3] : undefined,
+      };
+    }
+  }
+
+  // Room + Game unique Station QR: CAMPUS_AU:STATION:<ROOM>:<TOKEN>:<STATION_ID>
+  // Also supports unscoped CAMPUS_AU:STATION:<STATION_ID>
+  if (upper.startsWith('CAMPUS_AU:STATION:')) {
+    const parts = upper.split(':');
+    if (parts.length >= 5) {
+      const roomCode = parts[2];
+      const matchToken = parts[3];
+      const stationId = parts.slice(4).join(':');
+      if (activeStations.some((s) => s.id === stationId)) {
+        return { kind: 'station', stationId, roomCode, matchToken };
+      }
+    } else if (parts.length >= 3) {
+      const stationId = parts.slice(2).join(':');
+      if (activeStations.some((s) => s.id === stationId)) {
+        return { kind: 'station', stationId };
+      }
     }
   }
 
   // Backward-compatible fallback for legacy CAIRL payloads
-  if (trimmed.startsWith('CAIRL:BADGE:')) {
-    const num = trimmed.replace('CAIRL:BADGE:', '').padStart(2, '0');
+  if (upper.startsWith('CAIRL:BADGE:')) {
+    const num = upper.replace('CAIRL:BADGE:', '').padStart(2, '0');
     if (WRISTBAND_BADGES.some((b) => b.number === num)) {
       return { kind: 'badge', badgeNumber: num };
     }
   }
-  if (trimmed.startsWith('CAIRL:STATION:')) {
-    const legacyId = trimmed.replace('CAIRL:STATION:', '').toUpperCase();
+  if (upper.startsWith('CAIRL:STATION:')) {
+    const legacyId = upper.replace('CAIRL:STATION:', '');
     const mappedId = legacyId === 'SEMINAR_HALL' ? 'SEMINAR_1' : legacyId;
     if (activeStations.some((s) => s.id === mappedId)) {
       return { kind: 'station', stationId: mappedId };

@@ -3,32 +3,41 @@ import {
   AlertTriangle,
   Camera,
   CheckCircle2,
+  Clock,
   Crosshair,
+  Eye,
   EyeOff,
   Fingerprint,
   Ghost,
+  History,
   Lock,
   LogOut,
+  MapPin,
   Megaphone,
   Radio,
   RotateCcw,
   ShieldAlert,
-  ShieldCheck,
   Skull,
-  Smartphone,
   Trophy,
   Users,
   Zap,
 } from 'lucide-react';
 import {
+  getBadgeInfo,
   toTaskStation,
   type Player,
   type PlayerRole,
   type PlayerStatus,
   type SabotageState,
 } from '../shared/gameData';
+import type { ImpostorOpsLogEntry } from '../hooks/useCampusGame';
 import { useCampusStations } from '../config/stationStore';
-import { playUiClick } from '../utils/feedback';
+import {
+  playCountdownTick,
+  playPhantomChime,
+  playUiClick,
+  playVictoryFanfare,
+} from '../utils/feedback';
 import { vibratePattern } from '../utils/sound';
 
 interface GameplayScreenProps {
@@ -38,15 +47,25 @@ interface GameplayScreenProps {
   effectiveStatus: PlayerStatus;
   taskProgress: number;
   sabotage: SabotageState | null;
+  sabotageStationIds?: string[];
   isCommsSabotaged?: boolean;
   commsLabel?: string;
   assignedStationIds?: string[];
   killCooldownEnd: number;
+  isMeetingLocked?: boolean;
+  impostorOpsLog?: ImpostorOpsLogEntry[];
+  observingPlayer?: {
+    name: string;
+    badgeNumber: string;
+    role: PlayerRole;
+  } | null;
+  onExitPov?: () => void;
   winner: 'crewmates' | 'impostors' | null;
   winReason: string | null;
   onScanStation: (preselectedStationId?: string) => void;
   onReportBody: () => void;
   onEliminateScan: () => void;
+  onBlockedKillAttempt?: (cooldownSeconds: number) => void;
   onTriggerSabotage: (type?: 'REACTOR' | 'COMMS') => void;
   onDefuseSabotage: () => void;
   onCallMeeting: () => void;
@@ -57,64 +76,34 @@ interface GameplayScreenProps {
 
 const LONG_PRESS_OPS_MS = 450;
 const DOUBLE_TAP_WINDOW_MS = 600;
-const TOUCH_SLIP_THRESHOLD_PX = 10;
-const MAX_ROLL_GAMMA_DEG = 20;
-const MIN_PITCH_BETA_DEG = -10;
-const MAX_PITCH_BETA_DEG = 74;
-const MAX_DELTA_GAMMA_DEG = 11;
-const MAX_DELTA_BETA_DEG = 15;
-
-interface OrientationReading {
-  beta: number | null;
-  gamma: number | null;
-}
-
-type DeviceOrientationPermissionConstructor = typeof DeviceOrientationEvent & {
-  requestPermission?: () => Promise<'granted' | 'denied'>;
-};
-
-function isOrientationTilted(
-  current: OrientationReading,
-  baseline: OrientationReading | null
-): boolean {
-  const { beta, gamma } = current;
-  if (beta === null && gamma === null) return false;
-
-  if (gamma !== null && Math.abs(gamma) > MAX_ROLL_GAMMA_DEG) {
-    return true;
-  }
-  if (
-    beta !== null &&
-    (beta < MIN_PITCH_BETA_DEG || beta > MAX_PITCH_BETA_DEG)
-  ) {
-    return true;
-  }
-
-  if (baseline) {
-    if (
-      gamma !== null &&
-      baseline.gamma !== null &&
-      Math.abs(gamma - baseline.gamma) > MAX_DELTA_GAMMA_DEG
-    ) {
-      return true;
-    }
-    if (
-      beta !== null &&
-      baseline.beta !== null &&
-      Math.abs(beta - baseline.beta) > MAX_DELTA_BETA_DEG
-    ) {
-      return true;
-    }
-  }
-
-  return false;
-}
 
 function formatClock(totalSeconds: number): string {
   const s = Math.max(0, totalSeconds);
   const mins = Math.floor(s / 60);
   const secs = s % 60;
   return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+}
+
+function formatLogTimestamp(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString([], {
+      hour: '2-digit',
+      minute: '2-digit',
+      second: '2-digit',
+      hour12: false,
+    });
+  } catch {
+    return '--:--:--';
+  }
+}
+
+function formatRelativeElapsed(ts: number, nowMs: number): string {
+  const diffSec = Math.max(0, Math.floor((nowMs - ts) / 1000));
+  if (diffSec < 5) return 'just now';
+  if (diffSec < 60) return `${diffSec}s ago`;
+  const mins = Math.floor(diffSec / 60);
+  const secs = diffSec % 60;
+  return `${mins}m ${String(secs).padStart(2, '0')}s ago`;
 }
 
 export function GameplayScreen({
@@ -124,15 +113,21 @@ export function GameplayScreen({
   effectiveStatus,
   taskProgress,
   sabotage,
+  sabotageStationIds,
   isCommsSabotaged = false,
   commsLabel = 'Cyber Lab / Reception',
   assignedStationIds,
   killCooldownEnd,
+  isMeetingLocked = false,
+  impostorOpsLog = [],
+  observingPlayer = null,
+  onExitPov,
   winner,
   winReason,
   onScanStation,
   onReportBody,
   onEliminateScan,
+  onBlockedKillAttempt,
   onTriggerSabotage,
   onDefuseSabotage,
   onCallMeeting,
@@ -141,42 +136,68 @@ export function GameplayScreen({
   onExitMatch,
 }: GameplayScreenProps) {
   const [roleRevealed, setRoleRevealed] = useState(false);
-  const [isPhoneTilted, setIsPhoneTilted] = useState(false);
-  const [isWindowHidden, setIsWindowHidden] = useState(false);
   const [covertOpsOpen, setCovertOpsOpen] = useState(false);
+  const [covertTab, setCovertTab] = useState<'ops' | 'log'>('ops');
+  const [logFilter, setLogFilter] = useState<'all' | 'kills' | 'sabotages'>('all');
   const [confirmExitOpen, setConfirmExitOpen] = useState(false);
   const [holdChargePct, setHoldChargePct] = useState(0);
   const [now, setNow] = useState(Date.now());
+  const [progressDelta, setProgressDelta] = useState<number | null>(null);
+  const [progressPulse, setProgressPulse] = useState(false);
   const activeStations = useCampusStations().map(toTaskStation);
+
+  const clampedTaskProgress = Math.max(
+    0,
+    Math.min(100, Math.round(Number.isFinite(taskProgress) ? taskProgress : 0))
+  );
 
   const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const chargeRafRef = useRef<number>(0);
   const holdStartRef = useRef<number>(0);
   const lastTapRef = useRef<number>(0);
   const covertOpenedAtRef = useRef<number>(0);
-  const activePointersRef = useRef<Set<number>>(new Set());
-  const holdOriginRef = useRef<{
-    pointerId: number;
-    x: number;
-    y: number;
-  } | null>(null);
-  const orientationRef = useRef<OrientationReading>({
-    beta: null,
-    gamma: null,
-  });
-  const holdBaselineRef = useRef<OrientationReading | null>(null);
-  const orientationPermissionRequestedRef = useRef(false);
+  const prevWinnerRef = useRef<'crewmates' | 'impostors' | null>(null);
+  const lastTickSecRef = useRef<number>(-1);
+  const prevTaskProgressRef = useRef<number>(clampedTaskProgress);
+  const progressPulseTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    const prev = prevTaskProgressRef.current;
+    if (clampedTaskProgress > prev) {
+      const diff = clampedTaskProgress - prev;
+      setProgressDelta(diff);
+      setProgressPulse(true);
+      if (progressPulseTimerRef.current) {
+        clearTimeout(progressPulseTimerRef.current);
+      }
+      progressPulseTimerRef.current = setTimeout(() => {
+        setProgressPulse(false);
+        setProgressDelta(null);
+      }, 2800);
+    } else if (clampedTaskProgress < prev) {
+      setProgressDelta(null);
+      setProgressPulse(false);
+    }
+    prevTaskProgressRef.current = clampedTaskProgress;
+  }, [clampedTaskProgress]);
+
+  useEffect(() => {
+    return () => {
+      if (progressPulseTimerRef.current) {
+        clearTimeout(progressPulseTimerRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), 500);
     return () => clearInterval(timer);
   }, []);
 
-  // Always auto-mask covert sheet & role peek if status changes, match ends, or Esc pressed
+  // Auto-hide covert sheet & role peek if status changes or match ends
   useEffect(() => {
     if (winner || effectiveStatus !== 'alive') {
       setRoleRevealed(false);
-      setIsPhoneTilted(false);
       setCovertOpsOpen(false);
     }
     if (winner) {
@@ -209,105 +230,20 @@ export function GameplayScreen({
 
   useEffect(() => clearHoldTimers, [clearHoldTimers]);
 
-  const engagePrivacyLock = useCallback(
-    (alsoMaskCovert = false) => {
-      clearHoldTimers();
-      activePointersRef.current.clear();
-      holdOriginRef.current = null;
-      holdBaselineRef.current = null;
-      setRoleRevealed(false);
-      if (alsoMaskCovert) {
-        setCovertOpsOpen(false);
-      }
-    },
-    [clearHoldTimers]
-  );
-
-  // Subtle Tilt Sensor Check + Window Focus / Visibility Privacy Guard
-  useEffect(() => {
-    const handleOrientation = (event: DeviceOrientationEvent) => {
-      if (event.beta === null && event.gamma === null) return;
-      const reading: OrientationReading = {
-        beta: typeof event.beta === 'number' ? event.beta : null,
-        gamma: typeof event.gamma === 'number' ? event.gamma : null,
-      };
-      orientationRef.current = reading;
-      const tilted = isOrientationTilted(reading, holdBaselineRef.current);
-      setIsPhoneTilted(tilted);
-      if (tilted) {
-        clearHoldTimers();
-      }
-    };
-
-    const handleVisibilityOrBlur = () => {
-      const hidden = document.visibilityState === 'hidden';
-      setIsWindowHidden(hidden || !document.hasFocus());
-      engagePrivacyLock(true);
-    };
-
-    const handleFocus = () => {
-      setIsWindowHidden(document.visibilityState === 'hidden');
-    };
-
-    window.addEventListener('deviceorientation', handleOrientation);
-    window.addEventListener('blur', handleVisibilityOrBlur);
-    window.addEventListener('pagehide', handleVisibilityOrBlur);
-    window.addEventListener('focus', handleFocus);
-    document.addEventListener('visibilitychange', handleVisibilityOrBlur);
-
-    return () => {
-      window.removeEventListener('deviceorientation', handleOrientation);
-      window.removeEventListener('blur', handleVisibilityOrBlur);
-      window.removeEventListener('pagehide', handleVisibilityOrBlur);
-      window.removeEventListener('focus', handleFocus);
-      document.removeEventListener('visibilitychange', handleVisibilityOrBlur);
-    };
-  }, [clearHoldTimers, engagePrivacyLock]);
-
-  const requestOrientationSensorIfNeeded = useCallback(() => {
-    if (orientationPermissionRequestedRef.current) return;
-    orientationPermissionRequestedRef.current = true;
-    const ctor = window.DeviceOrientationEvent as
-      | DeviceOrientationPermissionConstructor
-      | undefined;
-    if (ctor && typeof ctor.requestPermission === 'function') {
-      void ctor.requestPermission().catch(() => {
-        // Ignore denied/unsupported motion permission smoothly
-      });
-    }
-  }, []);
-
   const openCovertOps = useCallback(() => {
     vibratePattern([25, 45, 25]);
     playUiClick();
     covertOpenedAtRef.current = Date.now();
     lastTapRef.current = 0;
-    holdOriginRef.current = null;
-    holdBaselineRef.current = null;
     setRoleRevealed(false);
     setCovertOpsOpen(true);
   }, []);
 
   const startShieldHold = useCallback(() => {
     playUiClick();
-    holdBaselineRef.current =
-      orientationRef.current.beta !== null ||
-      orientationRef.current.gamma !== null
-        ? { ...orientationRef.current }
-        : null;
-
-    const tiltedNow = isOrientationTilted(
-      orientationRef.current,
-      holdBaselineRef.current
-    );
-    setIsPhoneTilted(tiltedNow);
     setRoleRevealed(true);
 
-    if (
-      tiltedNow ||
-      effectiveRole !== 'impostor' ||
-      effectiveStatus !== 'alive'
-    ) {
+    if (effectiveRole !== 'impostor' || effectiveStatus === 'eliminated') {
       return;
     }
 
@@ -321,12 +257,6 @@ export function GameplayScreen({
 
     holdStartRef.current = performance.now();
     const animateCharge = (ts: number) => {
-      if (
-        isOrientationTilted(orientationRef.current, holdBaselineRef.current)
-      ) {
-        clearHoldTimers();
-        return;
-      }
       const elapsed = ts - holdStartRef.current;
       const pct = Math.min(100, (elapsed / LONG_PRESS_OPS_MS) * 100);
       setHoldChargePct(pct);
@@ -338,11 +268,7 @@ export function GameplayScreen({
 
     holdTimerRef.current = setTimeout(() => {
       clearHoldTimers();
-      if (
-        !isOrientationTilted(orientationRef.current, holdBaselineRef.current)
-      ) {
-        openCovertOps();
-      }
+      openCovertOps();
     }, LONG_PRESS_OPS_MS);
   }, [effectiveRole, effectiveStatus, clearHoldTimers, openCovertOps]);
 
@@ -350,21 +276,6 @@ export function GameplayScreen({
     e: React.PointerEvent<HTMLButtonElement>
   ) => {
     if (e.button !== 0 && e.pointerType === 'mouse') return;
-    requestOrientationSensorIfNeeded();
-
-    activePointersRef.current.add(e.pointerId);
-    // Multi-touch guard: snap privacy blur shut if >1 finger touches the shield
-    if (activePointersRef.current.size > 1) {
-      engagePrivacyLock(false);
-      return;
-    }
-
-    holdOriginRef.current = {
-      pointerId: e.pointerId,
-      x: e.clientX,
-      y: e.clientY,
-    };
-
     try {
       e.currentTarget.setPointerCapture(e.pointerId);
     } catch {
@@ -373,27 +284,8 @@ export function GameplayScreen({
     startShieldHold();
   };
 
-  const handleShieldPointerMove = (
-    e: React.PointerEvent<HTMLButtonElement>
-  ) => {
-    const origin = holdOriginRef.current;
-    if (!origin || origin.pointerId !== e.pointerId) return;
-    const distance = Math.hypot(e.clientX - origin.x, e.clientY - origin.y);
-    if (distance > TOUCH_SLIP_THRESHOLD_PX) {
-      // Very sensitive touch-hold threshold: any slip > 10px immediately engages blur
-      engagePrivacyLock(false);
-    }
-  };
-
-  const handleShieldPointerEnd = (
-    e?: React.PointerEvent<HTMLButtonElement>
-  ) => {
-    if (e) {
-      activePointersRef.current.delete(e.pointerId);
-    }
+  const handleShieldPointerEnd = () => {
     clearHoldTimers();
-    holdOriginRef.current = null;
-    holdBaselineRef.current = null;
     setRoleRevealed(false);
   };
 
@@ -407,7 +299,7 @@ export function GameplayScreen({
     } catch {
       // ignore
     }
-    handleShieldPointerEnd(e);
+    handleShieldPointerEnd();
   };
 
   const handleShieldKeyDown = (e: React.KeyboardEvent<HTMLButtonElement>) => {
@@ -428,6 +320,30 @@ export function GameplayScreen({
   const sabotageSecondsLeft = sabotage
     ? Math.max(0, Math.ceil((sabotage.expiresAt - now) / 1000))
     : 0;
+
+  // Victory fanfare SFX when winner transitions from null
+  useEffect(() => {
+    if (winner && prevWinnerRef.current !== winner) {
+      playVictoryFanfare(winner);
+    }
+    prevWinnerRef.current = winner;
+  }, [winner]);
+
+  // Subtle countdown tick during final 10 seconds of Reactor Meltdown
+  useEffect(() => {
+    if (
+      sabotage?.type === 'reactor' &&
+      sabotageSecondsLeft > 0 &&
+      sabotageSecondsLeft <= 10 &&
+      lastTickSecRef.current !== sabotageSecondsLeft
+    ) {
+      lastTickSecRef.current = sabotageSecondsLeft;
+      playCountdownTick(sabotageSecondsLeft <= 5);
+    } else if (!sabotage || sabotageSecondsLeft > 10) {
+      lastTickSecRef.current = -1;
+    }
+  }, [sabotage, sabotageSecondsLeft]);
+
   const killCooldownSeconds = Math.max(
     0,
     Math.ceil((killCooldownEnd - now) / 1000)
@@ -497,11 +413,31 @@ export function GameplayScreen({
     </div>
   );
 
-  // SCREEN 6A: ELIMINATED BEFORE MEETING
+  // SCREEN 6A: ELIMINATED BEFORE ENTERING PHANTOM MODE
   if (effectiveStatus === 'eliminated' && !winner) {
     return (
-      <div className="flex-1 min-h-0 flex flex-col justify-between px-4 sm:px-5 pb-4 pt-2">
-        <div className="flex justify-end shrink-0">
+      <div className="flex-1 min-h-0 flex flex-col justify-between px-4 sm:px-5 pb-4 pt-2 gap-3">
+        <div className="flex items-center justify-between gap-2 shrink-0">
+          {observingPlayer ? (
+            <div className="flex items-center gap-2 rounded-xl bg-amber-500/15 border border-amber-400/45 px-2.5 py-1.5 text-[10px] font-mono font-bold text-amber-200">
+              <Eye className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span>
+                POV: #{observingPlayer.badgeNumber} {observingPlayer.name}
+              </span>
+              {onExitPov && (
+                <button
+                  type="button"
+                  onClick={onExitPov}
+                  className="ml-1 px-1.5 py-0.5 rounded bg-amber-400/20 text-white hover:bg-amber-400/35"
+                >
+                  Exit
+                </button>
+              )}
+            </div>
+          ) : (
+            <div />
+          )}
+
           {onExitMatch && (
             <button
               type="button"
@@ -517,37 +453,102 @@ export function GameplayScreen({
           )}
         </div>
 
+        {/* Live Global Team Task Progress Bar (visible even while entering Phantom Mode) */}
+        <div className="shrink-0 glass-card rounded-2xl px-3.5 py-2.5 space-y-1.5">
+          <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold tracking-wider uppercase">
+            <span className="inline-flex items-center gap-1.5 text-slate-200">
+              <span
+                className={`w-2 h-2 rounded-full ${
+                  isCommsSabotaged
+                    ? 'bg-amber-400 animate-pulse'
+                    : progressPulse
+                    ? 'bg-emerald-300 shadow-[0_0_10px_rgba(52,211,153,0.95)]'
+                    : 'bg-emerald-400'
+                }`}
+              />
+              <span>Team Task Progress</span>
+            </span>
+            <span className="font-mono tabular-nums text-emerald-400 flex items-center gap-1.5">
+              {!isCommsSabotaged && progressDelta !== null && (
+                <span className="text-[10px] font-extrabold text-cyan-300 animate-pulse">
+                  +{progressDelta}%
+                </span>
+              )}
+              <span>{isCommsSabotaged ? 'OFFLINE' : `${clampedTaskProgress}%`}</span>
+            </span>
+          </div>
+          <div
+            role="progressbar"
+            aria-label="Global Team Task Progress"
+            aria-valuenow={isCommsSabotaged ? undefined : clampedTaskProgress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="relative h-3 w-full rounded-full bg-slate-950/90 border border-white/12 p-0.5 overflow-hidden"
+          >
+            {isCommsSabotaged ? (
+              <div className="h-full w-full rounded-full bg-amber-500/20 flex items-center justify-center text-[8px] font-mono font-bold tracking-widest uppercase text-amber-300">
+                COMMS JAMMED
+              </div>
+            ) : (
+              <>
+                <div
+                  className="relative h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 shadow-[0_0_12px_rgba(16,185,129,0.7)] transition-[width] duration-700 ease-out overflow-hidden"
+                  style={{ width: `${clampedTaskProgress}%` }}
+                >
+                  {progressPulse && (
+                    <span
+                      aria-hidden="true"
+                      className="animate-progress-sweep pointer-events-none absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/70 to-transparent"
+                    />
+                  )}
+                </div>
+                <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-1/4 w-px bg-slate-950/70" />
+                <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-2/4 w-px bg-slate-950/70" />
+                <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-3/4 w-px bg-slate-950/70" />
+              </>
+            )}
+          </div>
+        </div>
+
         <div className="my-auto space-y-4 text-center">
           <div className="relative w-24 h-24 mx-auto flex items-center justify-center">
-            <span className="animate-radar absolute inset-0 rounded-full border border-violet-400/50" />
-            <div className="relative w-20 h-20 rounded-3xl bg-violet-500/20 border-2 border-violet-400/70 shadow-[0_0_40px_rgba(139,92,246,0.55)] flex items-center justify-center">
-              <Skull className="w-10 h-10 text-violet-200" />
+            <span className="animate-radar absolute inset-0 rounded-full border border-rose-500/55" />
+            <div className="relative w-20 h-20 rounded-3xl bg-gradient-to-br from-rose-600/30 to-violet-600/30 border-2 border-rose-400/75 shadow-[0_0_40px_rgba(244,63,94,0.45)] flex items-center justify-center">
+              <Skull className="w-10 h-10 text-rose-200" />
             </div>
           </div>
 
-          <div className="glass-card rounded-3xl p-5 border-violet-400/35 space-y-2.5">
-            <div className="text-[11px] font-mono font-bold tracking-widest uppercase text-violet-300">
-              SIGNAL TERMINATED
+          <div className="glass-card rounded-3xl p-5 border-rose-400/40 space-y-3">
+            <div className="text-[11px] font-mono font-bold tracking-widest uppercase text-rose-300">
+              OPERATIVE ELIMINATED · RED HEADBAND PROTOCOL
             </div>
             <h1 className="font-display text-2xl font-extrabold tracking-wide uppercase text-white">
               YOU WERE ELIMINATED
             </h1>
-            <p className="text-sm font-medium text-violet-100 leading-relaxed">
-              Sit down at this exact spot so Crewmates can find and report your wristband.
-            </p>
-            <p className="text-xs text-violet-300/80">
-              Remain silent and keep your badge visible until a meeting is called.
+            <div className="rounded-2xl bg-rose-500/15 border border-rose-400/40 px-3.5 py-2.5 text-left space-y-1.5">
+              <p className="text-xs sm:text-sm font-bold text-rose-100 leading-relaxed">
+                1. Put on the <span className="text-rose-300 underline decoration-rose-400/70">Red Headband</span> given to you immediately so other players can identify that you are eliminated and scan your ID Card to report.
+              </p>
+              <p className="text-xs sm:text-sm font-semibold text-violet-100 leading-relaxed">
+                2. Do not sit idle — enter <span className="text-violet-300 font-extrabold">Phantom Mode</span> now and keep moving silently to complete your remaining campus missions!
+              </p>
+            </div>
+            <p className="text-[11px] text-slate-300">
+              Remain completely silent during gameplay and meetings. Keep your ID Card visible.
             </p>
           </div>
         </div>
 
         <button
           type="button"
-          onClick={onEnterGhostMode}
+          onClick={() => {
+            playPhantomChime();
+            onEnterGhostMode();
+          }}
           className="shrink-0 w-full h-14 rounded-2xl bg-gradient-to-r from-violet-600 to-fuchsia-600 text-white font-display font-extrabold text-base tracking-wide uppercase flex items-center justify-center gap-2 shadow-[0_0_26px_rgba(139,92,246,0.45)] active:scale-95 transition-all"
         >
           <Ghost className="w-5 h-5" />
-          <span>Enter Phantom Mode</span>
+          <span>Enter Phantom Mode &amp; Resume Missions</span>
         </button>
 
         {exitConfirmationModal}
@@ -555,36 +556,96 @@ export function GameplayScreen({
     );
   }
 
-  // Note: Privacy Blur hides all classified role text completely unless the card
-  // is actively held steady AND the phone is held flat (not tilted).
-  const isCardUnblurred = roleRevealed && !isPhoneTilted && !isWindowHidden;
   const showingImpostorPeek =
-    isCardUnblurred &&
+    roleRevealed &&
     effectiveRole === 'impostor' &&
     effectiveStatus === 'alive';
-  const showingCrewmatePeek = isCardUnblurred && !showingImpostorPeek;
-  const tiltBlockedDuringHold = roleRevealed && isPhoneTilted;
 
   return (
     <div className="flex-1 min-h-0 flex flex-col justify-between px-3.5 sm:px-5 pb-3 sm:pb-4 pt-1 gap-2 sm:gap-2.5">
       {/* Top HUD Region */}
       <div className="shrink-0 space-y-2">
-        <div className="glass-card rounded-2xl px-3.5 py-2.5 space-y-1.5">
-          <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold tracking-wider uppercase">
-            <span className="text-slate-300 truncate">
-              Team Tasks{' '}
-              <span className="text-emerald-400 font-mono tabular-nums ml-1">
-                {taskProgress}%
+        {observingPlayer && (
+          <div className="rounded-xl bg-amber-500/15 border border-amber-400/50 px-3 py-1.5 flex items-center justify-between gap-2 text-[11px] font-mono">
+            <div className="flex items-center gap-1.5 text-amber-200 min-w-0">
+              <Eye className="w-3.5 h-3.5 text-amber-300 shrink-0" />
+              <span className="truncate font-bold">
+                DEV POV · #{observingPlayer.badgeNumber} {observingPlayer.name}{' '}
+                ({observingPlayer.role.toUpperCase()})
               </span>
-            </span>
+            </div>
+            {onExitPov && (
+              <button
+                type="button"
+                onClick={() => {
+                  playUiClick();
+                  onExitPov();
+                }}
+                className="shrink-0 px-2 py-0.5 rounded-lg bg-amber-400/25 hover:bg-amber-400/40 text-amber-100 font-bold text-[10px] uppercase"
+              >
+                My POV
+              </button>
+            )}
+          </div>
+        )}
+
+        <div
+          className={`glass-card rounded-2xl px-3.5 py-2.5 space-y-2 transition-colors duration-300 ${
+            progressPulse && !isCommsSabotaged
+              ? 'border-emerald-400/55 shadow-[0_0_24px_rgba(16,185,129,0.22)]'
+              : isCommsSabotaged
+              ? 'border-amber-400/50'
+              : ''
+          }`}
+        >
+          <div className="flex items-center justify-between gap-2 text-[11px] font-extrabold tracking-wider uppercase">
+            <div className="min-w-0">
+              <div className="flex items-center gap-1.5 text-slate-200 truncate">
+                <span
+                  aria-hidden="true"
+                  className={`w-2 h-2 rounded-full shrink-0 transition-all ${
+                    isCommsSabotaged
+                      ? 'bg-amber-400 animate-pulse'
+                      : progressPulse
+                      ? 'bg-emerald-300 scale-125 shadow-[0_0_12px_rgba(52,211,153,0.95)]'
+                      : 'bg-emerald-400 shadow-[0_0_8px_rgba(16,185,129,0.7)]'
+                  }`}
+                />
+                <span className="truncate">Total Tasks</span>
+                <span
+                  className={`font-mono tabular-nums ml-0.5 ${
+                    isCommsSabotaged ? 'text-amber-300' : 'text-emerald-400'
+                  }`}
+                >
+                  {isCommsSabotaged ? 'JAMMED' : `${clampedTaskProgress}%`}
+                </span>
+                {!isCommsSabotaged && progressDelta !== null && (
+                  <span className="font-mono text-[10px] font-extrabold text-cyan-300 tabular-nums animate-pulse">
+                    +{progressDelta}%
+                  </span>
+                )}
+              </div>
+              {myPlayer && (
+                <div className="text-[10px] font-mono font-semibold text-slate-400 normal-case tracking-normal truncate mt-0.5">
+                  #{myPlayer.badgeNumber} · {myPlayer.name}
+                  <span aria-hidden="true" className="mx-1 text-slate-600">·</span>
+                  <span className="text-cyan-300">
+                    {getBadgeInfo(myPlayer.badgeNumber).callsign}
+                  </span>
+                </div>
+              )}
+            </div>
             <div className="flex items-center gap-1.5 shrink-0">
               {effectiveStatus === 'alive' && (
                 <button
                   type="button"
-                  onClick={onCallMeeting}
-                  className="min-h-[34px] px-2 rounded-lg text-[11px] font-bold text-amber-400 hover:text-amber-300 hover:bg-amber-500/10 flex items-center gap-1 transition-colors whitespace-nowrap"
+                  onClick={() => {
+                    playUiClick();
+                    onCallMeeting();
+                  }}
+                  className="min-h-[42px] px-3 rounded-xl bg-amber-500/18 hover:bg-amber-500/28 active:scale-95 border border-amber-400/50 text-[11px] font-extrabold text-amber-200 flex items-center gap-1.5 transition-all whitespace-nowrap shadow-[0_0_16px_rgba(245,158,11,0.18)]"
                 >
-                  <Megaphone className="w-3.5 h-3.5" />
+                  <Megaphone className="w-3.5 h-3.5 shrink-0" />
                   <span>Call Meeting</span>
                 </button>
               )}
@@ -596,20 +657,58 @@ export function GameplayScreen({
                     setConfirmExitOpen(true);
                   }}
                   title="Exit Active Match"
-                  className="min-h-[34px] px-2 rounded-lg bg-slate-900/80 hover:bg-rose-950/80 border border-white/10 hover:border-rose-500/40 text-[10px] font-bold text-slate-300 hover:text-rose-200 flex items-center gap-1 transition-colors whitespace-nowrap"
+                  className="min-h-[42px] px-2.5 rounded-xl bg-slate-900/85 hover:bg-rose-950/80 active:scale-95 border border-white/12 hover:border-rose-500/45 text-[11px] font-bold text-slate-300 hover:text-rose-200 flex items-center gap-1 transition-all whitespace-nowrap"
                 >
-                  <LogOut className="w-3 h-3" />
+                  <LogOut className="w-3.5 h-3.5 shrink-0" />
                   <span>Exit</span>
                 </button>
               )}
             </div>
           </div>
 
-          <div className="h-3 w-full rounded-full bg-slate-950/90 border border-white/10 p-0.5 overflow-hidden">
-            <div
-              className="h-full rounded-full bg-gradient-to-r from-emerald-500 to-cyan-400 shadow-[0_0_12px_rgba(16,185,129,0.7)] transition-all duration-500 ease-out"
-              style={{ width: `${Math.min(100, Math.max(4, taskProgress))}%` }}
-            />
+          <div
+            role="progressbar"
+            aria-label="Global Team Task Progress"
+            aria-valuenow={isCommsSabotaged ? undefined : clampedTaskProgress}
+            aria-valuemin={0}
+            aria-valuemax={100}
+            className="relative h-4 w-full rounded-full bg-slate-950/90 border border-white/12 p-0.5 overflow-hidden"
+          >
+            {isCommsSabotaged ? (
+              <div className="h-full w-full rounded-full bg-amber-500/20 flex items-center justify-center text-[9px] font-mono font-extrabold tracking-widest uppercase text-amber-300">
+                COMMS SABOTAGED · PROGRESS OFFLINE
+              </div>
+            ) : (
+              <>
+                <div
+                  className="relative h-full rounded-full bg-gradient-to-r from-emerald-500 via-teal-400 to-cyan-400 shadow-[0_0_16px_rgba(16,185,129,0.75)] transition-[width] duration-700 ease-out overflow-hidden"
+                  style={{ width: `${clampedTaskProgress}%` }}
+                >
+                  {progressPulse && (
+                    <span
+                      aria-hidden="true"
+                      className="animate-progress-sweep pointer-events-none absolute inset-y-0 w-1/2 bg-gradient-to-r from-transparent via-white/75 to-transparent"
+                    />
+                  )}
+                  {clampedTaskProgress > 0 && clampedTaskProgress < 100 && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute right-0 inset-y-0 w-1.5 bg-white/80 blur-[1px]"
+                    />
+                  )}
+                </div>
+                {[10, 20, 30, 40, 50, 60, 70, 80, 90].map((mark) => (
+                  <span
+                    key={mark}
+                    aria-hidden="true"
+                    className={`pointer-events-none absolute inset-y-0 w-px ${
+                      mark === 50 ? 'bg-slate-950/85' : 'bg-slate-950/55'
+                    }`}
+                    style={{ left: `${mark}%` }}
+                  />
+                ))}
+              </>
+            )}
           </div>
         </div>
 
@@ -627,7 +726,7 @@ export function GameplayScreen({
             <button
               type="button"
               onClick={() => onScanStation(sabotage.targetStationId)}
-              className="shrink-0 min-h-[32px] px-2.5 rounded-lg bg-rose-500 text-white text-[10px] font-extrabold uppercase"
+              className="shrink-0 min-h-[36px] px-3 rounded-lg bg-rose-500 text-white text-[10px] font-extrabold uppercase active:scale-95"
             >
               Defuse
             </button>
@@ -639,190 +738,127 @@ export function GameplayScreen({
           <div className="rounded-2xl bg-violet-950/80 border border-violet-400/50 px-3 py-2 flex items-center gap-2">
             <Ghost className="w-4 h-4 text-violet-300 shrink-0" />
             <span className="text-[11px] font-bold text-violet-100 leading-tight">
-              Phantom Mode · Stay silent and finish remaining objectives
+              Phantom Mode · Wear your Red Headband · Stay silent &amp; finish remaining missions
             </span>
           </div>
         )}
       </div>
 
-      {/* Middle Area: Privacy Shield + Campus Objectives */}
+      {/* Middle Area: Role Card + Campus Objectives */}
       <div className="flex-1 min-h-0 flex flex-col gap-2">
-        {/* TACTICAL PRIVACY SHIELD (Hardware Tilt + Sensitive Hold + Privacy Blur Overlay) */}
+        {/* Clean Hold-to-Reveal Role Card (Identical Resting State for Crewmate & Impostor) */}
         <button
           type="button"
           onPointerDown={handleShieldPointerDown}
-          onPointerMove={handleShieldPointerMove}
           onPointerUp={handleShieldPointerEnd}
           onPointerCancel={handleShieldPointerEnd}
           onPointerLeave={handleShieldPointerLeave}
           onKeyDown={handleShieldKeyDown}
           onKeyUp={handleShieldKeyUp}
-          onBlur={() => handleShieldPointerEnd()}
+          onBlur={handleShieldPointerEnd}
           onDragStart={(e) => e.preventDefault()}
           onContextMenu={(e) => e.preventDefault()}
-          aria-label="Press and hold flat and steady to unblur your classified identity"
-          className={`relative overflow-hidden w-full min-h-[66px] rounded-2xl p-3 text-left transition-colors duration-150 touch-callout-none touch-none select-none glass-card shrink-0 flex items-center ${
-            !isCardUnblurred
-              ? tiltBlockedDuringHold
-                ? 'border-amber-400/45 bg-slate-950/90'
-                : 'border-white/15 hover:border-white/25'
+          aria-label="Press and hold to view your role"
+          className={`relative overflow-hidden w-full min-h-[64px] rounded-2xl p-3 text-left transition-colors duration-150 touch-callout-none touch-none select-none glass-card shrink-0 flex items-center ${
+            !roleRevealed
+              ? 'border-white/15 hover:border-white/25'
               : showingImpostorPeek
-              ? 'bg-rose-950/85 border-rose-400/75 shadow-[0_0_26px_rgba(244,63,94,0.35)]'
-              : 'bg-cyan-950/85 border-cyan-400/75 shadow-[0_0_26px_rgba(6,182,212,0.35)]'
+              ? 'bg-rose-950/85 border-rose-400/75 shadow-[0_0_24px_rgba(244,63,94,0.3)]'
+              : 'bg-cyan-950/85 border-cyan-400/75 shadow-[0_0_24px_rgba(6,182,212,0.3)]'
           }`}
         >
-          {/* Hold-charge indicator bar visible ONLY while Impostor is holding flat */}
+          {/* Hold-charge indicator bar visible only while Impostor is holding */}
           {showingImpostorPeek && holdChargePct > 0 && (
             <div
-              className="pointer-events-none absolute bottom-0 left-0 h-0.5 bg-rose-400 transition-none z-20"
+              className="pointer-events-none absolute bottom-0 left-0 h-0.5 bg-rose-400 transition-none z-10"
               style={{ width: `${holdChargePct}%` }}
             />
           )}
 
-          {/* Layer 1: Classified Role Layer (Text unmounted & blurred unless held steady & flat) */}
-          <div
-            aria-hidden={!isCardUnblurred}
-            className={`w-full transition-all duration-100 ${
-              isCardUnblurred
-                ? 'opacity-100 blur-0'
-                : 'opacity-0 blur-xl scale-[0.98] pointer-events-none'
-            }`}
-          >
-            {showingImpostorPeek ? (
-              <div className="w-full flex items-center justify-between gap-2.5">
-                <div className="min-w-0">
-                  <div className="flex items-baseline gap-2">
-                    <span className="font-display text-lg font-extrabold tracking-wider uppercase text-rose-400 leading-none">
-                      IMPOSTOR
-                    </span>
-                    {fellowImpostors.length > 0 && (
-                      <span className="text-[10px] font-mono font-bold text-rose-200 truncate">
-                        Ally:{' '}
-                        {fellowImpostors
-                          .map((p) => `#${p.badgeNumber}`)
-                          .join(', ')}
-                      </span>
-                    )}
-                  </div>
-                  <div className="text-[10px] font-bold tracking-wide text-rose-100/90 mt-1">
-                    Hold 0.5s or double-tap for Covert Ops
-                  </div>
+          {!roleRevealed ? (
+            <div className="w-full flex items-center justify-between gap-2.5">
+              <div className="flex items-center gap-2.5 min-w-0">
+                <div className="w-10 h-10 rounded-xl bg-slate-900/90 border border-cyan-400/30 flex items-center justify-center shrink-0 shadow-[0_0_14px_rgba(6,182,212,0.18)]">
+                  <Fingerprint className="w-5 h-5 text-cyan-300" />
                 </div>
-
-                <div className="relative w-10 h-10 flex items-center justify-center shrink-0">
-                  <svg className="w-10 h-10 -rotate-90" viewBox="0 0 44 44">
-                    <circle
-                      cx="22"
-                      cy="22"
-                      r="18"
-                      fill="none"
-                      stroke="rgba(255,255,255,0.12)"
-                      strokeWidth="3.5"
-                    />
-                    <circle
-                      cx="22"
-                      cy="22"
-                      r="18"
-                      fill="none"
-                      stroke="#f43f5e"
-                      strokeWidth="3.5"
-                      strokeLinecap="round"
-                      strokeDasharray={2 * Math.PI * 18}
-                      strokeDashoffset={2 * Math.PI * 18 * (1 - cooldownRatio)}
-                    />
-                  </svg>
-                  <span className="absolute font-mono text-[10px] font-extrabold text-white tabular-nums">
-                    {killCooldownSeconds}s
-                  </span>
+                <div className="min-w-0">
+                  <div className="flex items-center gap-1.5 font-display text-xs font-extrabold tracking-wider uppercase text-white">
+                    <Lock className="w-3 h-3 text-slate-400 shrink-0" />
+                    <span className="truncate">Role Shield Locked</span>
+                  </div>
+                  <div className="text-[11px] font-medium text-slate-300 truncate">
+                    Press &amp; hold to privately inspect role
+                  </div>
                 </div>
               </div>
-            ) : showingCrewmatePeek ? (
-              <div className="w-full flex items-center justify-between gap-2.5">
-                <div>
-                  <div className="font-display text-lg font-extrabold tracking-wider uppercase text-cyan-300 leading-none">
-                    CREWMATE
-                  </div>
-                  <div className="text-[10px] font-bold tracking-wide uppercase text-cyan-100 mt-1">
-                    Complete assigned objectives
-                  </div>
+              <span className="text-[11px] font-mono font-bold text-cyan-300 shrink-0">
+                HOLD
+              </span>
+            </div>
+          ) : showingImpostorPeek ? (
+            <div className="w-full flex items-center justify-between gap-2.5">
+              <div className="min-w-0">
+                <div className="flex items-baseline gap-2">
+                  <span className="font-display text-lg font-extrabold tracking-wider uppercase text-rose-400 leading-none">
+                    IMPOSTOR
+                  </span>
+                  {fellowImpostors.length > 0 && (
+                    <span className="text-[10px] font-mono font-bold text-rose-200 truncate">
+                      Ally:{' '}
+                      {fellowImpostors
+                        .map((p) => `#${p.badgeNumber}`)
+                        .join(', ')}
+                    </span>
+                  )}
                 </div>
-                <span className="text-[11px] font-mono font-bold text-cyan-200 tabular-nums shrink-0">
-                  {completedIds.length}/
-                  {assignedStationIds?.length || activeStations.length} Scans
+                <div className="text-[10px] font-bold tracking-wide text-rose-100/90 mt-1">
+                  Hold 0.5s or double-tap for Covert Ops
+                </div>
+              </div>
+
+              <div className="relative w-10 h-10 flex items-center justify-center shrink-0">
+                <svg className="w-10 h-10 -rotate-90" viewBox="0 0 44 44">
+                  <circle
+                    cx="22"
+                    cy="22"
+                    r="18"
+                    fill="none"
+                    stroke="rgba(255,255,255,0.12)"
+                    strokeWidth="3.5"
+                  />
+                  <circle
+                    cx="22"
+                    cy="22"
+                    r="18"
+                    fill="none"
+                    stroke="#f43f5e"
+                    strokeWidth="3.5"
+                    strokeLinecap="round"
+                    strokeDasharray={2 * Math.PI * 18}
+                    strokeDashoffset={2 * Math.PI * 18 * (1 - cooldownRatio)}
+                  />
+                </svg>
+                <span className="absolute font-mono text-[10px] font-extrabold text-white tabular-nums">
+                  {killCooldownSeconds}s
                 </span>
               </div>
-            ) : (
-              /* Redacted dummy bars while blurred so zero classified text exists in layout or DOM */
-              <div className="w-full flex items-center justify-between gap-2.5">
-                <div className="space-y-1.5">
-                  <div className="h-4 w-28 rounded bg-slate-600/40" />
-                  <div className="h-2.5 w-40 rounded bg-slate-700/40" />
-                </div>
-                <div className="h-6 w-12 rounded-lg bg-slate-700/40" />
-              </div>
-            )}
-          </div>
-
-          {/* Layer 2: Frosted Privacy Blur Overlay (100% Identical for Crewmate & Impostor) */}
-          <div
-            className={`absolute inset-0 z-10 px-3 flex items-center justify-between gap-2.5 backdrop-blur-2xl transition-opacity duration-100 ${
-              isCardUnblurred
-                ? 'opacity-0 pointer-events-none'
-                : tiltBlockedDuringHold
-                ? 'opacity-100 bg-slate-950/92'
-                : 'opacity-100 bg-[#0b1222]/88'
-            }`}
-          >
-            <div className="flex items-center gap-2.5 min-w-0">
-              <div
-                className={`w-9 h-9 rounded-xl border flex items-center justify-center shrink-0 ${
-                  tiltBlockedDuringHold
-                    ? 'bg-amber-500/15 border-amber-400/45'
-                    : 'bg-slate-800/90 border-white/15'
-                }`}
-              >
-                {tiltBlockedDuringHold ? (
-                  <Smartphone className="w-5 h-5 text-amber-300" />
-                ) : (
-                  <Fingerprint className="w-5 h-5 text-cyan-300" />
-                )}
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5 font-display text-xs font-extrabold tracking-wider uppercase text-white">
-                  <Lock
-                    className={`w-3 h-3 shrink-0 ${
-                      tiltBlockedDuringHold
-                        ? 'text-amber-300'
-                        : 'text-slate-400'
-                    }`}
-                  />
-                  <span className="truncate">
-                    {tiltBlockedDuringHold
-                      ? 'Tilt Guard Locked'
-                      : 'Identity Classified'}
-                  </span>
-                </div>
-                <div
-                  className={`text-[10px] font-semibold truncate ${
-                    tiltBlockedDuringHold ? 'text-amber-200/85' : 'text-slate-400'
-                  }`}
-                >
-                  {tiltBlockedDuringHold
-                    ? 'Phone tilted · Hold flat to unblur'
-                    : 'Hold flat & steady to peek'}
-                </div>
-              </div>
             </div>
-
-            <div className="flex items-center gap-1 text-[10px] font-mono font-bold text-slate-400 shrink-0">
-              {tiltBlockedDuringHold ? (
-                <EyeOff className="w-3.5 h-3.5 text-amber-300" />
-              ) : (
-                <ShieldCheck className="w-3.5 h-3.5 text-cyan-400/80" />
-              )}
-              <span>{tiltBlockedDuringHold ? 'Tilted' : 'Privacy Blur'}</span>
+          ) : (
+            <div className="w-full flex items-center justify-between gap-2.5">
+              <div>
+                <div className="font-display text-lg font-extrabold tracking-wider uppercase text-cyan-300 leading-none">
+                  CREWMATE
+                </div>
+                <div className="text-[10px] font-bold tracking-wide uppercase text-cyan-100 mt-1">
+                  Complete assigned objectives
+                </div>
+              </div>
+              <span className="text-[11px] font-mono font-bold text-cyan-200 tabular-nums shrink-0">
+                {completedIds.length}/
+                {assignedStationIds?.length || activeStations.length} Scans
+              </span>
             </div>
-          </div>
+          )}
         </button>
 
         {/* CAMPUS OBJECTIVES: Assigned Stations Grid (Identical for Crewmate & Impostor) */}
@@ -833,8 +869,19 @@ export function GameplayScreen({
                 ? activeStations.filter((s) => assignedStationIds.includes(s.id))
                 : activeStations;
 
+            const sabotageStationIdSet = new Set<string>(
+              sabotage
+                ? sabotageStationIds && sabotageStationIds.length > 0
+                  ? sabotageStationIds
+                  : sabotage.targetStationId
+                  ? [sabotage.targetStationId]
+                  : []
+                : []
+            );
+
             const visibleIdSet = new Set(visibleStations.map((s) => s.id));
             const consumedIds = new Set<string>();
+            const matchedSabotageIds = new Set<string>();
 
             interface ObjectiveCardItem {
               key: string;
@@ -845,6 +892,8 @@ export function GameplayScreen({
               taskTitle: string;
               subHint?: string;
               isDone: boolean;
+              sabotageMatchId: string | null;
+              isSabotageOnly?: boolean;
             }
 
             const objectiveCards: ObjectiveCardItem[] = [];
@@ -871,16 +920,33 @@ export function GameplayScreen({
                   const activeStep = step1Done ? step2 : step1;
                   const allDone = step1Done && step2Done;
 
+                  const sabotageMatchId = sabotageStationIdSet.has(step1.id)
+                    ? step1.id
+                    : sabotageStationIdSet.has(step2.id)
+                    ? step2.id
+                    : null;
+                  if (sabotageMatchId) {
+                    matchedSabotageIds.add(sabotageMatchId);
+                  }
+                  const sabotageStation =
+                    sabotageMatchId === step1.id
+                      ? step1
+                      : sabotageMatchId === step2.id
+                      ? step2
+                      : null;
+
                   objectiveCards.push({
                     key: `${step1.id}_${step2.id}`,
-                    scanStationId: activeStep.id,
+                    scanStationId: sabotageMatchId || activeStep.id,
                     badgeLabel: allDone
                       ? '2-STEP RELAY · 2/2'
                       : step1Done
                       ? '2-STEP RELAY · 2/2'
                       : '2-STEP RELAY · 1/2',
                     isLongRelay: true,
-                    locationLabel: activeStep.shortLabel,
+                    locationLabel: sabotageStation
+                      ? sabotageStation.shortLabel
+                      : activeStep.shortLabel,
                     taskTitle: activeStep.taskName,
                     subHint: allDone
                       ? 'Multi-floor relay complete'
@@ -888,12 +954,20 @@ export function GameplayScreen({
                       ? 'Downloaded · Upload at server'
                       : `Then → ${step2.shortLabel}`,
                     isDone: allDone,
+                    sabotageMatchId,
                   });
                   continue;
                 }
               }
 
               consumedIds.add(station.id);
+              const sabotageMatchId = sabotageStationIdSet.has(station.id)
+                ? station.id
+                : null;
+              if (sabotageMatchId) {
+                matchedSabotageIds.add(sabotageMatchId);
+              }
+
               objectiveCards.push({
                 key: station.id,
                 scanStationId: station.id,
@@ -905,10 +979,45 @@ export function GameplayScreen({
                 locationLabel: station.shortLabel,
                 taskTitle: station.taskName,
                 isDone: completedIds.includes(station.id),
+                sabotageMatchId,
               });
             }
 
-            const completedObjectivesCount = objectiveCards.filter(
+            // If an active sabotage station is outside the player's assigned subset, pin it to the list
+            if (sabotage && sabotageStationIdSet.size > 0) {
+              const extraSabotageCards: ObjectiveCardItem[] = [];
+              for (const sabId of sabotageStationIdSet) {
+                if (matchedSabotageIds.has(sabId)) continue;
+                const sabStation = activeStations.find((s) => s.id === sabId);
+                if (!sabStation) continue;
+                extraSabotageCards.push({
+                  key: `sabotage_${sabStation.id}`,
+                  scanStationId: sabStation.id,
+                  badgeLabel:
+                    sabotage.type === 'reactor'
+                      ? 'EMERGENCY LOCATION'
+                      : 'COMMS RELAY',
+                  isLongRelay: true,
+                  locationLabel: sabStation.shortLabel,
+                  taskTitle:
+                    sabotage.type === 'reactor'
+                      ? 'Defuse Reactor Meltdown'
+                      : 'Restore Campus Comms',
+                  subHint: 'Scan station QR here to clear alert',
+                  isDone: false,
+                  sabotageMatchId: sabStation.id,
+                  isSabotageOnly: true,
+                });
+              }
+              if (extraSabotageCards.length > 0) {
+                objectiveCards.unshift(...extraSabotageCards);
+              }
+            }
+
+            const assignedCards = objectiveCards.filter(
+              (c) => !c.isSabotageOnly
+            );
+            const completedObjectivesCount = assignedCards.filter(
               (c) => c.isDone
             ).length;
 
@@ -919,7 +1028,7 @@ export function GameplayScreen({
                     Campus Objectives
                   </h2>
                   <span className="text-[11px] font-mono text-slate-400 tabular-nums">
-                    {completedObjectivesCount}/{objectiveCards.length} Done
+                    {completedObjectivesCount}/{assignedCards.length} Done
                   </span>
                 </div>
 
@@ -929,6 +1038,11 @@ export function GameplayScreen({
                       const isLastOdd =
                         objectiveCards.length % 2 === 1 &&
                         idx === objectiveCards.length - 1;
+                      const isSabotageTarget = Boolean(
+                        sabotage && obj.sabotageMatchId
+                      );
+                      const isReactorTarget =
+                        isSabotageTarget && sabotage?.type === 'reactor';
                       const barColor = obj.isDone
                         ? 'bg-emerald-400 shadow-[0_0_10px_rgba(16,185,129,0.7)]'
                         : obj.isLongRelay
@@ -939,35 +1053,100 @@ export function GameplayScreen({
                         <button
                           key={obj.key}
                           type="button"
-                          onClick={() => onScanStation(obj.scanStationId)}
-                          className={`glass-card rounded-2xl p-2.5 sm:p-3.5 flex flex-col justify-between gap-1.5 text-left transition-all active:scale-95 ${
+                          onClick={() =>
+                            onScanStation(
+                              obj.sabotageMatchId || obj.scanStationId
+                            )
+                          }
+                          className={`relative overflow-hidden glass-card rounded-2xl p-2.5 sm:p-3.5 flex flex-col justify-between gap-1.5 text-left transition-all active:scale-95 ${
                             isLastOdd || obj.isLongRelay
                               ? 'col-span-2 min-h-[clamp(60px,8.5dvh,78px)]'
                               : 'min-h-[clamp(68px,10dvh,88px)]'
                           } ${
-                            obj.isDone
+                            isReactorTarget
+                              ? 'border-2 border-rose-400/80 bg-rose-950/40 hover:border-rose-300 ring-1 ring-rose-500/40 animate-sabotage-glow-reactor'
+                              : isSabotageTarget
+                              ? 'border-2 border-amber-400/80 bg-amber-950/38 hover:border-amber-300 ring-1 ring-amber-400/40 animate-sabotage-glow-comms'
+                              : obj.isDone
                               ? 'border-emerald-500/45 bg-emerald-950/30'
                               : obj.isLongRelay
                               ? 'border-amber-400/35 hover:border-amber-400/60'
                               : 'hover:border-white/25'
                           }`}
                         >
-                          <div className="flex items-center justify-between gap-1.5 w-full">
+                          {isSabotageTarget && (
+                            <span
+                              aria-hidden="true"
+                              className={`pointer-events-none absolute inset-y-0 -left-1/3 w-1/2 animate-sabotage-sweep bg-gradient-to-r from-transparent ${
+                                isReactorTarget
+                                  ? 'via-rose-400/22'
+                                  : 'via-amber-300/22'
+                              } to-transparent`}
+                            />
+                          )}
+                          <div className="relative z-10 flex items-center justify-between gap-1.5 w-full">
                             <div className="flex items-center gap-1.5 min-w-0">
-                              <span className={`w-3.5 h-1 rounded-full shrink-0 ${barColor}`} />
+                              {isSabotageTarget ? (
+                                <span
+                                  aria-hidden="true"
+                                  className="relative flex h-2.5 w-2.5 shrink-0"
+                                >
+                                  <span
+                                    className={`animate-ping motion-reduce:animate-none absolute inline-flex h-full w-full rounded-full opacity-80 ${
+                                      isReactorTarget
+                                        ? 'bg-rose-400'
+                                        : 'bg-amber-400'
+                                    }`}
+                                  />
+                                  <span
+                                    className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                                      isReactorTarget
+                                        ? 'bg-rose-500 shadow-[0_0_8px_rgba(244,63,94,0.9)]'
+                                        : 'bg-amber-400 shadow-[0_0_8px_rgba(245,158,11,0.9)]'
+                                    }`}
+                                  />
+                                </span>
+                              ) : (
+                                <span
+                                  className={`w-3.5 h-1 rounded-full shrink-0 ${barColor}`}
+                                />
+                              )}
                               <span
                                 className={`text-[9px] font-mono font-extrabold tracking-wide truncate ${
-                                  obj.isDone
+                                  isReactorTarget
+                                    ? 'text-rose-300'
+                                    : isSabotageTarget
+                                    ? 'text-amber-300'
+                                    : obj.isDone
                                     ? 'text-emerald-300'
                                     : obj.isLongRelay
                                     ? 'text-amber-300'
                                     : 'text-cyan-300'
                                 }`}
                               >
-                                {obj.badgeLabel}
+                                {isReactorTarget
+                                  ? 'SABOTAGE · DEFUSE HERE'
+                                  : isSabotageTarget
+                                  ? 'COMMS · RESTORE HERE'
+                                  : obj.badgeLabel}
                               </span>
                             </div>
-                            {obj.isDone ? (
+                            {isSabotageTarget ? (
+                              <span
+                                className={`inline-flex items-center gap-1 text-[9px] font-mono font-extrabold uppercase shrink-0 ${
+                                  isReactorTarget
+                                    ? 'text-rose-300'
+                                    : 'text-amber-300'
+                                }`}
+                              >
+                                {isReactorTarget ? (
+                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                ) : (
+                                  <Radio className="w-3.5 h-3.5 shrink-0" />
+                                )}
+                                <span>{isReactorTarget ? 'Defuse' : 'Fix'}</span>
+                              </span>
+                            ) : obj.isDone ? (
                               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
                             ) : (
                               <span className="text-[9px] font-mono font-bold text-slate-400 shrink-0">
@@ -977,26 +1156,54 @@ export function GameplayScreen({
                           </div>
 
                           <div className="space-y-0.5">
-                            <div className="text-[10px] font-mono font-bold tracking-wide text-slate-300 leading-tight line-clamp-1">
-                              {isCommsSabotaged
-                                ? 'SIGNAL JAMMED · OFFLINE'
-                                : obj.locationLabel}
+                            <div
+                              className={`text-[10px] font-mono font-bold tracking-wide leading-tight flex items-center gap-1 ${
+                                isReactorTarget
+                                  ? 'text-rose-200'
+                                  : isSabotageTarget
+                                  ? 'text-amber-200'
+                                  : 'text-slate-300'
+                              }`}
+                            >
+                              {isSabotageTarget && (
+                                <MapPin className="w-3 h-3 shrink-0" />
+                              )}
+                              <span className="line-clamp-1">
+                                {isCommsSabotaged && !isSabotageTarget
+                                  ? 'SIGNAL JAMMED · OFFLINE'
+                                  : obj.locationLabel}
+                              </span>
                             </div>
                             <div
                               className={`font-display text-xs font-extrabold leading-tight ${
-                                obj.isDone
+                                obj.isDone && !isSabotageTarget
                                   ? 'text-emerald-300 line-through opacity-80'
                                   : 'text-white'
                               }`}
                             >
-                              {isCommsSabotaged
+                              {isCommsSabotaged && !isSabotageTarget
                                 ? `Restore Comms at ${commsLabel}`
                                 : obj.taskTitle}
                             </div>
-                            {!isCommsSabotaged && obj.subHint && (
-                              <div className="text-[10px] font-mono text-amber-200/80 leading-tight">
-                                {obj.subHint}
+                            {isSabotageTarget ? (
+                              <div
+                                className={`text-[10px] font-mono leading-tight ${
+                                  isReactorTarget
+                                    ? 'text-rose-200/85'
+                                    : 'text-amber-200/85'
+                                }`}
+                              >
+                                {isReactorTarget
+                                  ? 'Active sabotage location · Scan QR to defuse'
+                                  : 'Active sabotage location · Scan QR to restore'}
                               </div>
+                            ) : (
+                              !isCommsSabotaged &&
+                              obj.subHint && (
+                                <div className="text-[10px] font-mono text-amber-200/80 leading-tight">
+                                  {obj.subHint}
+                                </div>
+                              )
                             )}
                           </div>
                         </button>
@@ -1016,7 +1223,7 @@ export function GameplayScreen({
           <button
             type="button"
             onClick={() => onScanStation()}
-            className="w-full h-14 rounded-xl bg-gradient-to-r from-violet-500 to-cyan-500 text-slate-950 font-display font-extrabold text-sm tracking-wide uppercase flex items-center justify-center gap-2 shadow-[0_0_20px_rgba(139,92,246,0.45)] active:scale-95 transition-all"
+            className="tactical-btn-primary w-full h-14 rounded-xl bg-gradient-to-r from-violet-400 to-cyan-400 text-slate-950 font-display font-extrabold text-sm tracking-wide uppercase flex items-center justify-center gap-2 shadow-[0_0_24px_rgba(139,92,246,0.45)]"
           >
             <Camera className="w-5 h-5" />
             <span>Scan Task QR (Phantom)</span>
@@ -1026,7 +1233,7 @@ export function GameplayScreen({
             <button
               type="button"
               onClick={() => onScanStation()}
-              className="h-14 rounded-xl bg-gradient-to-r from-cyan-500 to-emerald-500 text-slate-950 font-display font-extrabold text-xs tracking-wide uppercase flex items-center justify-center gap-1.5 px-2 shadow-[0_0_20px_rgba(6,182,212,0.4)] active:scale-95 transition-all whitespace-nowrap"
+              className="tactical-btn-primary h-14 rounded-xl bg-gradient-to-r from-cyan-400 to-emerald-400 text-slate-950 font-display font-extrabold text-xs sm:text-sm tracking-wide uppercase flex items-center justify-center gap-1.5 px-2.5 shadow-[0_0_22px_rgba(6,182,212,0.4)] whitespace-nowrap"
             >
               <Camera className="w-4 h-4 shrink-0" />
               <span>Scan Task QR</span>
@@ -1034,7 +1241,7 @@ export function GameplayScreen({
             <button
               type="button"
               onClick={onReportBody}
-              className="h-14 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-display font-extrabold text-xs tracking-wide uppercase flex items-center justify-center gap-1.5 px-2 shadow-[0_0_20px_rgba(244,63,94,0.45)] active:scale-95 transition-all whitespace-nowrap"
+              className="tactical-btn-primary h-14 rounded-xl bg-gradient-to-r from-rose-600 to-rose-500 text-white font-display font-extrabold text-xs sm:text-sm tracking-wide uppercase flex items-center justify-center gap-1.5 px-2.5 shadow-[0_0_22px_rgba(244,63,94,0.45)] whitespace-nowrap"
             >
               <Megaphone className="w-4 h-4 shrink-0" />
               <span>Report Body</span>
@@ -1044,202 +1251,569 @@ export function GameplayScreen({
       </div>
 
       {/* Spacious Covert Impostor Operations Bottom Sheet (Hidden behind Double-Tap / 0.45s Hold) */}
-      {covertOpsOpen && effectiveRole === 'impostor' && effectiveStatus === 'alive' && (
-        <div
-          onClick={(e) => {
-            if (
-              e.target !== e.currentTarget ||
-              Date.now() - covertOpenedAtRef.current < 450
-            ) {
-              return;
-            }
-            setCovertOpsOpen(false);
-          }}
-          className="fixed inset-0 z-50 bg-[#060913]/88 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
-        >
-          <div
-            onClick={(e) => e.stopPropagation()}
-            className="w-full max-w-md glass-card rounded-t-3xl sm:rounded-3xl p-5 space-y-4 border-rose-500/35"
-          >
-            <div className="w-10 h-1.5 bg-white/20 rounded-full mx-auto -mt-1 sm:hidden" />
+      {covertOpsOpen &&
+        effectiveRole === 'impostor' &&
+        effectiveStatus !== 'eliminated' && (() => {
+          const killLogs = impostorOpsLog.filter((e) => e.kind === 'KILL');
+          const sabotageLogs = impostorOpsLog.filter(
+            (e) => e.kind === 'SABOTAGE_TRIGGERED'
+          );
+          const filteredLogs = impostorOpsLog.filter((e) => {
+            if (logFilter === 'kills') return e.kind === 'KILL';
+            if (logFilter === 'sabotages') return e.kind !== 'KILL';
+            return true;
+          });
+          const latestKill = killLogs[0] || null;
+          const impostorIdSet = new Set<string>([
+            ...(myPlayer ? [myPlayer.id] : []),
+            ...fellowImpostors.map((p) => p.id),
+          ]);
+          const livingCrewTargets = players.filter(
+            (p) => p.status === 'alive' && !impostorIdSet.has(p.id)
+          ).length;
+          const isGhostImpostor = effectiveStatus === 'ghost';
 
-            {/* Sheet Header */}
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-center gap-2.5 min-w-0">
-                <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-400/50 flex items-center justify-center shrink-0">
-                  <ShieldAlert className="w-5 h-5 text-rose-400" />
-                </div>
-                <div className="min-w-0">
-                  <h3 className="font-display text-base font-extrabold tracking-wider uppercase text-white">
-                    Covert Operations
-                  </h3>
-                  <p className="text-[11px] font-mono text-rose-200/80 truncate">
-                    Tap Mask anytime to hide screen
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => {
-                  playUiClick();
-                  setCovertOpsOpen(false);
-                }}
-                className="min-h-[44px] px-3 rounded-xl bg-slate-900 border border-white/15 text-slate-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shrink-0"
-              >
-                <EyeOff className="w-4 h-4 text-cyan-300" />
-                <span>Mask</span>
-              </button>
-            </div>
-
-            {/* Cooldown + Fellow Impostor Status Card */}
-            <div className="rounded-2xl bg-slate-950/85 border border-white/10 p-3.5 flex items-center justify-between gap-3">
-              <div className="space-y-1 min-w-0">
-                <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400">
-                  Elimination Status
-                </div>
-                <div
-                  className={`font-display text-sm font-extrabold uppercase ${
-                    killCooldownSeconds > 0 ? 'text-amber-300' : 'text-rose-400'
-                  }`}
-                >
-                  {killCooldownSeconds > 0
-                    ? `Cooldown · ${killCooldownSeconds}s`
-                    : 'Target Lock Ready'}
-                </div>
-                <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
-                  <Users className="w-3.5 h-3.5 text-rose-300 shrink-0" />
-                  <span className="truncate">
-                    {fellowImpostors.length > 0
-                      ? `Allies: ${fellowImpostors
-                          .map((p) => `#${p.badgeNumber} ${p.name}`)
-                          .join(', ')}`
-                      : 'Solo Impostor'}
-                  </span>
-                </div>
-              </div>
-
-              <div className="relative w-12 h-12 flex items-center justify-center shrink-0">
-                <svg className="w-12 h-12 -rotate-90" viewBox="0 0 44 44">
-                  <circle
-                    cx="22"
-                    cy="22"
-                    r="18"
-                    fill="none"
-                    stroke="rgba(255,255,255,0.12)"
-                    strokeWidth="3.5"
-                  />
-                  <circle
-                    cx="22"
-                    cy="22"
-                    r="18"
-                    fill="none"
-                    stroke={killCooldownSeconds > 0 ? '#f59e0b' : '#f43f5e'}
-                    strokeWidth="3.5"
-                    strokeLinecap="round"
-                    strokeDasharray={2 * Math.PI * 18}
-                    strokeDashoffset={2 * Math.PI * 18 * (1 - cooldownRatio)}
-                  />
-                </svg>
-                <span className="absolute font-mono text-[11px] font-extrabold text-white tabular-nums">
-                  {killCooldownSeconds}s
-                </span>
-              </div>
-            </div>
-
-            {/* Primary Action: Eliminate Wristband */}
-            <button
-              type="button"
-              disabled={killCooldownSeconds > 0}
-              onClick={() => {
+          return (
+            <div
+              onClick={(e) => {
+                if (
+                  e.target !== e.currentTarget ||
+                  Date.now() - covertOpenedAtRef.current < 450
+                ) {
+                  return;
+                }
                 setCovertOpsOpen(false);
-                onEliminateScan();
               }}
-              className="w-full h-14 rounded-2xl bg-rose-600 hover:bg-rose-500 disabled:bg-rose-950/80 disabled:text-rose-300/60 disabled:border disabled:border-rose-500/30 text-white font-display font-extrabold text-sm tracking-wide uppercase flex items-center justify-center gap-2 shadow-[0_0_24px_rgba(244,63,94,0.45)] active:scale-95 transition-all"
+              className="fixed inset-0 z-50 bg-[#060913]/88 backdrop-blur-md flex items-end sm:items-center justify-center p-0 sm:p-4"
             >
-              <Crosshair className="w-5 h-5 shrink-0" />
-              <span>
-                {killCooldownSeconds > 0
-                  ? `Cooldown Active (${killCooldownSeconds}s)`
-                  : 'Eliminate (Scan Wristband)'}
-              </span>
-            </button>
-
-            {/* Sabotage Grid */}
-            <div className="space-y-2">
-              <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400">
-                Sabotage Protocols
-              </div>
-              <div className="grid grid-cols-2 gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => {
-                    onTriggerSabotage('REACTOR');
-                    setCovertOpsOpen(false);
-                  }}
-                  className="h-12 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/50 text-rose-200 font-display font-extrabold text-xs tracking-wide uppercase flex items-center justify-center gap-1.5 active:scale-95 transition-all"
-                >
-                  <AlertTriangle className="w-4 h-4 shrink-0" />
-                  <span>Reactor (45s)</span>
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => {
-                    onTriggerSabotage('COMMS');
-                    setCovertOpsOpen(false);
-                  }}
-                  className="h-12 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-extrabold text-xs tracking-wide uppercase flex items-center justify-center gap-1.5 active:scale-95 transition-all"
-                >
-                  <Radio className="w-4 h-4 shrink-0" />
-                  <span>Jam Comms</span>
-                </button>
-              </div>
-
-              {sabotage && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onDefuseSabotage();
-                    setCovertOpsOpen(false);
-                  }}
-                  className="w-full h-11 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5"
-                >
-                  <Zap className="w-4 h-4 text-emerald-400" />
-                  <span>Clear Active Sabotage</span>
-                </button>
-              )}
-            </div>
-
-            {/* Secondary Cover Actions */}
-            <div className="grid grid-cols-2 gap-2.5 pt-1 border-t border-white/10">
-              <button
-                type="button"
-                onClick={() => {
-                  setCovertOpsOpen(false);
-                  onScanStation();
-                }}
-                className="h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5"
+              <div
+                onClick={(e) => e.stopPropagation()}
+                className="w-full max-w-md max-h-[88dvh] flex flex-col glass-card rounded-t-3xl sm:rounded-3xl p-5 gap-3.5 border-rose-500/35 overflow-hidden"
               >
-                <Camera className="w-4 h-4 text-cyan-300" />
-                <span>Fake Task Scan</span>
-              </button>
+                <div className="w-10 h-1.5 bg-white/20 rounded-full mx-auto -mt-1 sm:hidden shrink-0" />
 
-              <button
-                type="button"
-                onClick={() => {
-                  setCovertOpsOpen(false);
-                  onReportBody();
-                }}
-                className="h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5"
-              >
-                <Megaphone className="w-4 h-4 text-rose-400" />
-                <span>Report Body</span>
-              </button>
+                {/* Sheet Header */}
+                <div className="flex items-center justify-between gap-3 shrink-0">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <div className="w-10 h-10 rounded-xl bg-rose-500/20 border border-rose-400/50 flex items-center justify-center shrink-0">
+                      <ShieldAlert className="w-5 h-5 text-rose-400" />
+                    </div>
+                    <div className="min-w-0">
+                      <h3 className="font-display text-base font-extrabold tracking-wider uppercase text-white">
+                        Covert Operations
+                      </h3>
+                      <p className="text-[11px] font-mono text-rose-200/80 truncate">
+                        Tap Mask anytime to hide screen
+                      </p>
+                    </div>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playUiClick();
+                      setCovertOpsOpen(false);
+                    }}
+                    className="min-h-[42px] px-3 rounded-xl bg-slate-900 border border-white/15 text-slate-200 hover:text-white text-xs font-bold flex items-center gap-1.5 shrink-0"
+                  >
+                    <EyeOff className="w-4 h-4 text-cyan-300" />
+                    <span>Mask</span>
+                  </button>
+                </div>
+
+                {/* Covert Sheet Tab Switcher: Ops Controls vs Sabotage & Kill Log */}
+                <div className="grid grid-cols-2 gap-1.5 p-1 rounded-2xl bg-slate-950/90 border border-white/10 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playUiClick();
+                      setCovertTab('ops');
+                    }}
+                    className={`min-h-[38px] rounded-xl text-xs font-display font-extrabold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
+                      covertTab === 'ops'
+                        ? 'bg-rose-600/90 text-white shadow-[0_0_16px_rgba(244,63,94,0.35)]'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <Crosshair className="w-3.5 h-3.5 shrink-0" />
+                    <span>Covert Ops</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      playUiClick();
+                      setCovertTab('log');
+                    }}
+                    className={`min-h-[38px] rounded-xl text-xs font-display font-extrabold uppercase tracking-wider flex items-center justify-center gap-1.5 transition-all ${
+                      covertTab === 'log'
+                        ? 'bg-rose-600/90 text-white shadow-[0_0_16px_rgba(244,63,94,0.35)]'
+                        : 'text-slate-400 hover:text-slate-200'
+                    }`}
+                  >
+                    <History className="w-3.5 h-3.5 shrink-0" />
+                    <span className="truncate">Sabotage &amp; Kill Log</span>
+                    {impostorOpsLog.length > 0 && (
+                      <span
+                        className={`px-1.5 py-0.5 rounded-md font-mono text-[10px] leading-none tabular-nums ${
+                          covertTab === 'log'
+                            ? 'bg-slate-950/45 text-white'
+                            : 'bg-rose-500/25 text-rose-200'
+                        }`}
+                      >
+                        {impostorOpsLog.length}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {covertTab === 'ops' ? (
+                  <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-3.5 pr-0.5">
+                    {/* Cooldown + Fellow Impostor Status Card */}
+                    <div className="rounded-2xl bg-slate-950/85 border border-white/10 p-3.5 flex items-center justify-between gap-3">
+                      <div className="space-y-1 min-w-0">
+                        <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                          {isGhostImpostor
+                            ? 'Phantom Impostor Status'
+                            : 'Elimination Status'}
+                        </div>
+                        <div
+                          className={`font-display text-sm font-extrabold uppercase ${
+                            isGhostImpostor
+                              ? 'text-violet-300'
+                              : killCooldownSeconds > 0
+                              ? 'text-amber-300'
+                              : 'text-rose-400'
+                          }`}
+                        >
+                          {isGhostImpostor
+                            ? 'Sabotage Support Only'
+                            : killCooldownSeconds > 0
+                            ? `Cooldown · ${killCooldownSeconds}s`
+                            : 'Target Lock Ready'}
+                        </div>
+                        <div className="flex items-center gap-1.5 text-[11px] font-mono text-slate-300">
+                          <Users className="w-3.5 h-3.5 text-rose-300 shrink-0" />
+                          <span className="truncate">
+                            {fellowImpostors.length > 0
+                              ? `Allies: ${fellowImpostors
+                                  .map((p) => `#${p.badgeNumber} ${p.name}`)
+                                  .join(', ')}`
+                              : 'Solo Impostor'}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="relative w-12 h-12 flex items-center justify-center shrink-0">
+                        <svg className="w-12 h-12 -rotate-90" viewBox="0 0 44 44">
+                          <circle
+                            cx="22"
+                            cy="22"
+                            r="18"
+                            fill="none"
+                            stroke="rgba(255,255,255,0.12)"
+                            strokeWidth="3.5"
+                          />
+                          <circle
+                            cx="22"
+                            cy="22"
+                            r="18"
+                            fill="none"
+                            stroke={
+                              isGhostImpostor
+                                ? '#a78bfa'
+                                : killCooldownSeconds > 0
+                                ? '#f59e0b'
+                                : '#f43f5e'
+                            }
+                            strokeWidth="3.5"
+                            strokeLinecap="round"
+                            strokeDasharray={2 * Math.PI * 18}
+                            strokeDashoffset={
+                              2 * Math.PI * 18 * (1 - cooldownRatio)
+                            }
+                          />
+                        </svg>
+                        <span className="absolute font-mono text-[11px] font-extrabold text-white tabular-nums">
+                          {isGhostImpostor ? 'GHOST' : `${killCooldownSeconds}s`}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Primary Action: Eliminate ID Card */}
+                    {!isGhostImpostor && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          if (isMeetingLocked) {
+                            setCovertOpsOpen(false);
+                            onEliminateScan();
+                            return;
+                          }
+                          if (killCooldownSeconds > 0) {
+                            onBlockedKillAttempt?.(killCooldownSeconds);
+                            return;
+                          }
+                          setCovertOpsOpen(false);
+                          onEliminateScan();
+                        }}
+                        className={`w-full h-14 rounded-2xl font-display font-extrabold text-sm tracking-wide uppercase flex items-center justify-center gap-2 active:scale-95 transition-all ${
+                          isMeetingLocked
+                            ? 'bg-slate-800/90 border border-amber-500/40 text-amber-200'
+                            : killCooldownSeconds > 0
+                            ? 'bg-amber-950/75 border border-amber-500/45 text-amber-200'
+                            : 'bg-rose-600 hover:bg-rose-500 text-white shadow-[0_0_24px_rgba(244,63,94,0.45)]'
+                        }`}
+                      >
+                        <Crosshair className="w-5 h-5 shrink-0" />
+                        <span>
+                          {isMeetingLocked
+                            ? 'Locked During Meeting / Report'
+                            : killCooldownSeconds > 0
+                            ? `Cooldown Active (${killCooldownSeconds}s)`
+                            : 'Eliminate (Scan ID Card)'}
+                        </span>
+                      </button>
+                    )}
+
+                    {/* Sabotage Grid */}
+                    <div className="space-y-2">
+                      <div className="text-[11px] font-mono font-bold uppercase tracking-wider text-slate-400">
+                        Sabotage Protocols
+                      </div>
+                      <div className="grid grid-cols-2 gap-2.5">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onTriggerSabotage('REACTOR');
+                            setCovertOpsOpen(false);
+                          }}
+                          className="h-12 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/50 text-rose-200 font-display font-extrabold text-xs tracking-wide uppercase flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                        >
+                          <AlertTriangle className="w-4 h-4 shrink-0" />
+                          <span>Reactor (2:00)</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onTriggerSabotage('COMMS');
+                            setCovertOpsOpen(false);
+                          }}
+                          className="h-12 rounded-xl bg-amber-500 hover:bg-amber-400 text-slate-950 font-display font-extrabold text-xs tracking-wide uppercase flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                        >
+                          <Radio className="w-4 h-4 shrink-0" />
+                          <span>Jam Comms</span>
+                        </button>
+                      </div>
+
+                      {sabotage && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onDefuseSabotage();
+                            setCovertOpsOpen(false);
+                          }}
+                          className="w-full h-11 rounded-xl bg-white/10 hover:bg-white/15 text-slate-200 font-bold text-xs uppercase tracking-wider flex items-center justify-center gap-1.5"
+                        >
+                          <Zap className="w-4 h-4 text-emerald-400" />
+                          <span>Clear Active Sabotage</span>
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Secondary Cover Actions */}
+                    <div className="grid grid-cols-2 gap-2.5 pt-1 border-t border-white/10">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCovertOpsOpen(false);
+                          onScanStation();
+                        }}
+                        className="h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5"
+                      >
+                        <Camera className="w-4 h-4 text-cyan-300" />
+                        <span>Fake Task Scan</span>
+                      </button>
+
+                      {!isGhostImpostor ? (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setCovertOpsOpen(false);
+                            onReportBody();
+                          }}
+                          className="h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5"
+                        >
+                          <Megaphone className="w-4 h-4 text-rose-400" />
+                          <span>Report Body</span>
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            playUiClick();
+                            setCovertTab('log');
+                          }}
+                          className="h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5"
+                        >
+                          <History className="w-4 h-4 text-rose-300" />
+                          <span>Open Kill Log</span>
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  /* Dedicated Sabotage & Kill Log View */
+                  <div className="flex-1 min-h-0 flex flex-col gap-3">
+                    {/* Tactical Coordination KPIs */}
+                    <div className="grid grid-cols-4 gap-1.5 shrink-0">
+                      <div className="rounded-xl bg-rose-950/50 border border-rose-500/30 p-2 text-center">
+                        <div className="font-mono text-base font-extrabold text-rose-300 tabular-nums leading-none">
+                          {killLogs.length}
+                        </div>
+                        <div className="text-[9px] font-mono uppercase tracking-wider text-rose-200/75 mt-1">
+                          Kills
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-amber-950/45 border border-amber-500/30 p-2 text-center">
+                        <div className="font-mono text-base font-extrabold text-amber-300 tabular-nums leading-none">
+                          {sabotageLogs.length}
+                        </div>
+                        <div className="text-[9px] font-mono uppercase tracking-wider text-amber-200/75 mt-1">
+                          Sabotages
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-slate-950/80 border border-white/10 p-2 text-center">
+                        <div className="font-mono text-base font-extrabold text-cyan-300 tabular-nums leading-none">
+                          {livingCrewTargets}
+                        </div>
+                        <div className="text-[9px] font-mono uppercase tracking-wider text-slate-400 mt-1">
+                          Crew Left
+                        </div>
+                      </div>
+                      <div className="rounded-xl bg-slate-950/80 border border-white/10 p-2 text-center">
+                        <div className="font-mono text-[11px] font-extrabold text-white tabular-nums leading-tight truncate">
+                          {latestKill
+                            ? formatRelativeElapsed(latestKill.timestamp, now).replace(
+                                ' ago',
+                                ''
+                              )
+                            : '--'}
+                        </div>
+                        <div className="text-[9px] font-mono uppercase tracking-wider text-slate-400 mt-1">
+                          Last Kill
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Filter Pills */}
+                    <div className="flex items-center justify-between gap-2 shrink-0">
+                      <div className="flex items-center gap-1.5">
+                        {(
+                          [
+                            { id: 'all', label: `All (${impostorOpsLog.length})` },
+                            { id: 'kills', label: `Kills (${killLogs.length})` },
+                            {
+                              id: 'sabotages',
+                              label: `Sabotage (${
+                                impostorOpsLog.length - killLogs.length
+                              })`,
+                            },
+                          ] as const
+                        ).map((tab) => (
+                          <button
+                            key={tab.id}
+                            type="button"
+                            onClick={() => {
+                              playUiClick();
+                              setLogFilter(tab.id);
+                            }}
+                            className={`px-2.5 py-1 rounded-lg text-[10px] font-mono font-bold uppercase tracking-wider border transition-colors ${
+                              logFilter === tab.id
+                                ? 'bg-rose-500/25 border-rose-400/60 text-rose-100'
+                                : 'bg-slate-950/75 border-white/10 text-slate-400 hover:text-slate-200'
+                            }`}
+                          >
+                            {tab.label}
+                          </button>
+                        ))}
+                      </div>
+                      <span className="text-[10px] font-mono text-slate-400 tabular-nums">
+                        LIVE SYNC
+                      </span>
+                    </div>
+
+                    {/* Chronological Event Timeline */}
+                    <div className="flex-1 min-h-0 overflow-y-auto overscroll-contain space-y-2 pr-0.5">
+                      {filteredLogs.length === 0 ? (
+                        <div className="rounded-2xl bg-slate-950/75 border border-dashed border-white/15 px-4 py-8 text-center space-y-1.5">
+                          <History className="w-6 h-6 text-slate-500 mx-auto" />
+                          <div className="text-xs font-bold text-slate-300">
+                            No {logFilter === 'kills' ? 'kills' : logFilter === 'sabotages' ? 'sabotage events' : 'covert activity'} recorded yet
+                          </div>
+                          <p className="text-[11px] text-slate-400 leading-relaxed">
+                            Successful eliminations (with exact timestamp &amp;
+                            victim badge ID) and sabotage events appear here
+                            automatically for Impostor coordination.
+                          </p>
+                        </div>
+                      ) : (
+                        filteredLogs.map((entry) => {
+                          if (entry.kind === 'KILL') {
+                            const badgeNum = entry.victimBadgeNumber || '01';
+                            const badgeInfo = getBadgeInfo(badgeNum);
+                            return (
+                              <div
+                                key={entry.id}
+                                className="rounded-2xl bg-rose-950/35 border border-rose-500/35 px-3 py-2.5 flex items-center justify-between gap-2.5"
+                              >
+                                <div className="flex items-center gap-2.5 min-w-0">
+                                  <div
+                                    className="w-9 h-9 rounded-xl flex flex-col items-center justify-center font-mono text-[10px] font-extrabold text-white border border-white/35 shrink-0"
+                                    style={{
+                                      backgroundColor: `${badgeInfo.hex}CC`,
+                                      boxShadow: `0 0 14px ${badgeInfo.hex}55`,
+                                    }}
+                                  >
+                                    <Skull className="w-3.5 h-3.5" />
+                                    <span className="leading-none mt-0.5">
+                                      #{badgeNum}
+                                    </span>
+                                  </div>
+                                  <div className="min-w-0 space-y-0.5">
+                                    <div className="flex items-center gap-1.5 flex-wrap">
+                                      <span className="font-mono text-[11px] font-extrabold text-rose-200 bg-rose-500/25 border border-rose-400/40 px-1.5 py-0.5 rounded">
+                                        {entry.victimBadgeId || `P${badgeNum}`}
+                                      </span>
+                                      <span className="text-xs font-bold text-white truncate">
+                                        {entry.victimName || `Operative #${badgeNum}`}
+                                      </span>
+                                      <span
+                                        className={`text-[9px] font-mono font-extrabold uppercase px-1.5 py-0.5 rounded ${
+                                          entry.actorSource === 'YOU'
+                                            ? 'bg-rose-500/30 text-rose-200'
+                                            : 'bg-amber-500/25 text-amber-200'
+                                        }`}
+                                      >
+                                        {entry.actorSource === 'YOU'
+                                          ? 'YOU'
+                                          : 'ALLY'}
+                                      </span>
+                                    </div>
+                                    <div className="text-[10px] font-mono text-rose-200/75">
+                                      Elimination Confirmed · {badgeInfo.colorName}
+                                    </div>
+                                  </div>
+                                </div>
+
+                                <div className="text-right shrink-0 space-y-0.5">
+                                  <div className="inline-flex items-center gap-1 font-mono text-[11px] font-extrabold text-white tabular-nums">
+                                    <Clock className="w-3 h-3 text-rose-300" />
+                                    <span>{formatLogTimestamp(entry.timestamp)}</span>
+                                  </div>
+                                  <div className="text-[10px] font-mono text-slate-400 tabular-nums">
+                                    {formatRelativeElapsed(entry.timestamp, now)}
+                                  </div>
+                                </div>
+                              </div>
+                            );
+                          }
+
+                          const isDefused = entry.kind === 'SABOTAGE_DEFUSED';
+                          const isReactor = entry.sabotageType === 'REACTOR';
+                          return (
+                            <div
+                              key={entry.id}
+                              className={`rounded-2xl px-3 py-2.5 border flex items-center justify-between gap-2.5 ${
+                                isDefused
+                                  ? 'bg-emerald-950/30 border-emerald-500/30'
+                                  : isReactor
+                                  ? 'bg-rose-950/25 border-rose-400/30'
+                                  : 'bg-amber-950/30 border-amber-400/30'
+                              }`}
+                            >
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div
+                                  className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 border ${
+                                    isDefused
+                                      ? 'bg-emerald-500/15 border-emerald-400/40 text-emerald-300'
+                                      : isReactor
+                                      ? 'bg-rose-500/15 border-rose-400/40 text-rose-300'
+                                      : 'bg-amber-500/15 border-amber-400/40 text-amber-300'
+                                  }`}
+                                >
+                                  {isDefused ? (
+                                    <CheckCircle2 className="w-4 h-4" />
+                                  ) : isReactor ? (
+                                    <AlertTriangle className="w-4 h-4" />
+                                  ) : (
+                                    <Radio className="w-4 h-4" />
+                                  )}
+                                </div>
+                                <div className="min-w-0 space-y-0.5">
+                                  <div className="text-xs font-bold text-white truncate">
+                                    {isDefused
+                                      ? `${
+                                          isReactor ? 'Reactor' : 'Comms'
+                                        } Sabotage Defused`
+                                      : isReactor
+                                      ? 'Reactor Meltdown Triggered'
+                                      : 'Comms Jammed'}
+                                  </div>
+                                  <div className="text-[10px] font-mono text-slate-300 truncate">
+                                    {entry.targetLabel
+                                      ? `Target: ${entry.targetLabel}`
+                                      : 'Campus Station Alert'}
+                                  </div>
+                                </div>
+                              </div>
+
+                              <div className="text-right shrink-0 space-y-0.5">
+                                <div className="inline-flex items-center gap-1 font-mono text-[11px] font-extrabold text-slate-100 tabular-nums">
+                                  <Clock className="w-3 h-3 text-slate-400" />
+                                  <span>{formatLogTimestamp(entry.timestamp)}</span>
+                                </div>
+                                <div className="text-[10px] font-mono text-slate-400 tabular-nums">
+                                  {formatRelativeElapsed(entry.timestamp, now)}
+                                </div>
+                              </div>
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+
+                    {/* Quick Action Bar back to Covert Ops */}
+                    <div className="grid grid-cols-2 gap-2 pt-1 border-t border-white/10 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          playUiClick();
+                          setCovertTab('ops');
+                        }}
+                        className="h-11 rounded-xl bg-slate-900 hover:bg-slate-800 border border-white/15 text-slate-200 text-xs font-bold flex items-center justify-center gap-1.5"
+                      >
+                        <Crosshair className="w-3.5 h-3.5 text-rose-400" />
+                        <span>Back to Ops</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onTriggerSabotage('REACTOR');
+                          setCovertOpsOpen(false);
+                        }}
+                        className="h-11 rounded-xl bg-rose-500/20 hover:bg-rose-500/30 border border-rose-400/50 text-rose-200 font-display font-extrabold text-xs uppercase tracking-wide flex items-center justify-center gap-1.5 active:scale-95 transition-all"
+                      >
+                        <AlertTriangle className="w-3.5 h-3.5" />
+                        <span>Trigger Reactor</span>
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
             </div>
-          </div>
-        </div>
-      )}
+          );
+        })()}
 
       {/* Match Victory Overlay */}
       {winner && (
